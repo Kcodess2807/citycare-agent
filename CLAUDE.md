@@ -71,12 +71,13 @@ $30 covers claude code + the agents + eval runs. wasting it is judged, spending 
 ## 03. commit pattern
 they read the git history. "fix", "update", "wip" or one big commit at the end all count against me.
 - small commits, pushed as we go, after each working piece.
-- before every commit: run `pytest` (must pass with no api key), then **give me a short summary of what changed and why, and wait for my ok. only then commit.** never commit on your own.
+- before every commit: run `pytest` (must pass with no api key), then **give me a short summary of what changed and why, and wait for my ok. only then commit.** never commit on your own. this applies to every commit, small fixes included.
+- run `pytest` on its own, never piped into `tail`/`grep` (a pipe hides the exit code). never commit or push on a failing run.
 - message says what changed and why, e.g. "add idempotency key to booking writes so a retry can't double-book".
 - imperative mood, capitalised subject, ~50 chars, no trailing punctuation. add a body only if it gives useful info (wrap at 72).
 - docs (`design-log.md`, `flow.md`) go in the same commit as the code they describe.
 - never commit secrets. check no key in the diff before committing.
-- don't create branches or push unless i say so.
+- don't create branches. push to `main` right after every commit (standing instruction, no need to ask).
 - no commits or pushes after i've sent the submission email.
 
 ## 04. session export reminder
