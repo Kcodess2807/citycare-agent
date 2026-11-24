@@ -122,6 +122,13 @@ _TAKEN_OFFER = {
     "hi": "वह समय अभी किसी और ने ले लिया, इसलिए बुक नहीं हुआ। इस डॉक्टर के साथ अगला खाली समय:",
 }
 
+# A 409 on a booking, but the slot is the patient's own booking: nothing new was booked, and there is no offer.
+_ALREADY = {
+    "en": "You already have this appointment: {doctor}, {when}, for {patient}. Nothing new was booked.",
+    "hinglish": "Yeh appointment aapke paas pehle se hai: {doctor}, {when}, {patient} ke liye. Kuch naya book nahi hua.",
+    "hi": "यह अपॉइंटमेंट आपके पास पहले से है: {doctor}, {when}, {patient} के लिए। कुछ नया बुक नहीं हुआ।",
+}
+
 _NOT_DONE = {
     "en": "Sorry, that was not done and nothing was changed. You can ask me to try again, or ask for our staff.",
     "hinglish": "Sorry, woh nahi ho paaya aur kuch bhi change nahi hua. Dobara try karne bolein, ya staff bol dein.",
@@ -173,6 +180,10 @@ def failed_reply(tool: str, reason: str, language: str | None) -> str:
     if "slot_taken" in reason and tool in _TAKEN[lang]:
         return _TAKEN[lang][tool]
     return _NOT_DONE[lang]
+
+
+def already_reply(display: dict[str, Any], language: str | None) -> str:
+    return _fill(_ALREADY[_lang(language)], display)
 
 
 def taken_offer_prefix(language: str | None) -> str:

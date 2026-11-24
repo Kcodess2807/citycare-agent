@@ -14,7 +14,7 @@ from agent_service import prompts
 from agent_service.gate import Gate
 from agent_service.hospital import HospitalClient
 from tests.fake_claude import text, tool_use
-from tests.test_confirm import ADMIN, BOOK, DR_RAO, LATER, PHONE, START, Rig, fresh, mine, route_to  # noqa: F401
+from tests.test_confirm import ADMIN, BOOK, DR_RAO, LATER, OTHER, PHONE, START, Rig, fresh, mine, route_to  # noqa: F401
 from tests.test_write_tools import script
 
 
@@ -147,3 +147,58 @@ def test_write_prompts_say_do_not_ask_and_give_an_example(prompt):
 def test_booking_picks_the_earliest_when_the_choice_is_open_and_billing_still_asks_which_bill():
     assert "pick the earliest match" in prompts.BOOKING and "Do not ask which one" in prompts.BOOKING
     assert "pick the earliest" not in prompts.BILLING and "several unpaid bills" in prompts.BILLING
+
+
+# ---- the slot is the patient's own booking: no offer, no new pending action
+
+
+def hold(phone):
+    """Book Dr. Rao at START straight on the mock, as if it happened earlier (a retry, another chat)."""
+    r = ADMIN.post("/appointments", json={"doctor_id": "d2", "start": START, "patient_name": "Asha", "phone": phone})
+    assert r.status_code == 201, r.text
+
+
+def test_a_409_on_a_slot_the_patient_already_holds_says_so_with_no_offer_and_no_pending():
+    rig = Rig()
+    rig.propose_booking()
+    hold(PHONE)  # between the read-back and the yes, the patient's own booking appears
+    r = rig.say("yes")
+    assert "already have this appointment" in r.reply and DR_RAO in r.reply and "Fri 4 Dec 2026, 5:00pm" in r.reply
+    assert "not booked" not in r.reply and "Next free time" not in r.reply and "Please confirm" not in r.reply and r.handoff is False
+    assert "pending" not in rig.state()
+    assert len(mine()) == 1 and len(rig.wire.posts("/appointments")) == 1  # the one that was already there, and one try that got a 409
+
+
+def test_the_already_booked_reply_is_in_the_patients_language():
+    rig = Rig()
+    rig.say("book karo", route_to("booking", "hinglish"), tool_use("book_appointment", BOOK), text("ok"))
+    hold(PHONE)
+    assert "pehle se hai" in rig.say("haan").reply
+
+
+def test_a_409_on_a_slot_someone_else_holds_still_offers_the_next_slot():
+    rig = Rig()
+    rig.propose_booking()
+    hold(OTHER)  # another patient took it
+    r = rig.say("yes")
+    assert "not booked" in r.reply and "5:30pm" in r.reply and "already have" not in r.reply
+    assert rig.state()["pending"]["params"]["start"].startswith("2026-12-04T17:30")
+
+
+def test_if_the_hospital_cannot_say_whose_booking_it_is_the_reply_says_neither_booked_nor_not_booked():
+    rig = Rig()
+    rig.propose_booking()
+    hold(PHONE)
+    rig.wire.timeout_on = lambda request: request.method == "GET" and request.url.path == "/appointments"  # only the ownership look-up
+    r = rig.say("yes")
+    assert r.handoff is True and "couldn't confirm" in r.reply and "don't try it again" in r.reply
+    assert "Next free time" not in r.reply and "pending" not in rig.state()
+
+
+def test_a_cancelled_booking_at_that_slot_is_not_the_patients_to_hold():
+    rig = Rig()
+    rig.propose_booking()
+    hold(PHONE)
+    mine_id = mine()[0]["id"]
+    ADMIN.post(f"/appointments/{mine_id}/cancel")  # cancelled again: the slot is free, so the booking just works
+    assert rig.say("yes").reply.startswith("Booked:")

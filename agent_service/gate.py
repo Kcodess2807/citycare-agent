@@ -136,6 +136,16 @@ class Gate:
             "readback": checked.readback,
         }
 
+    async def holds(self, doctor_id: str, start: dt.datetime, phone: str) -> bool | None:
+        """Does this patient already have a booked appointment with this doctor at this start? None: the hospital could not say."""
+        try:
+            appts = (await self._get("/appointments", phone=phone))["appointments"]
+            return any(
+                a["doctor_id"] == doctor_id and a["status"] == "booked" and dt.datetime.fromisoformat(a["start"]) == start for a in appts
+            )
+        except (ToolError, ValueError, KeyError, TypeError):
+            return None
+
     async def next_free_slot(self, doctor_id: str, after: dt.datetime, days: int = NEXT_SLOT_DAYS) -> dt.datetime | None:
         """The first free slot of this doctor after `after`, looking at that day and the next `days - 1`. None if none, or if the hospital cannot say."""
         try:

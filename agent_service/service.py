@@ -207,9 +207,14 @@ class ChatService:
                     reply = confirm.failed_reply(tool.name, result.reason, language)
                     handoff = isinstance(result, Failed) and result.escalate
                     if tool.name == "book_appointment" and "slot_taken" in result.reason:
-                        offer = await self._offer_next_slot(tool.name, inp, data)
-                        if offer:  # the next free slot, as a full read-back that waits for its own yes
-                            state["pending"], reply = offer, confirm.taken_offer_reply(offer["readback"], language)
+                        # The slot may be taken by the patient's own booking (a retry, a second chat). Ask before offering anything.
+                        own = await self.gate.holds(inp.doctor_id, inp.start, req.phone)
+                        if own is True:
+                            reply = confirm.already_reply(pending["display"], language)
+                        elif own is None:  # cannot tell whose booking it is, so say neither "booked" nor "not booked"
+                            reply, handoff = confirm.unknown_reply(language), True
+                        elif offer := await self._offer_next_slot(tool.name, inp, data):
+                            state["pending"], reply = offer, confirm.taken_offer_reply(offer["readback"], language)  # waits for its own yes
         state["links"] = data["links"]
         state["strikes"] = 0
         for outcome in state.get("outcomes", []):
