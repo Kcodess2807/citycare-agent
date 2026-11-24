@@ -1,6 +1,6 @@
 # How a message moves through the system
 
-Status: Phase 2 design agreed (docs/design-log.md, 2.1 to 2.10), no Phase 2 code yet. Built so far: agentcore (Phase 1, complete). Sections 2 and 3 are implemented; section 1 is the Phase 2 design, built in six commits (2.10). Updated in the same commit as the code it describes.
+Status: Phase 2 design agreed (docs/design-log.md, 2.1 to 2.10). Built so far: agentcore (Phase 1, complete) and Phase 2 commit 1 (hospital client and the four read tools, section 6). Sections 2 and 3 are implemented; section 1 is the Phase 2 design, built in six commits (2.10). Updated in the same commit as the code it describes.
 Blocks marked (P2) are built tonight, (P3) in Phase 3.
 
 ## 1. One `/chat` turn (Phase 2 design)
@@ -111,3 +111,22 @@ The whole box from `Save state: inflight` to `record outcome` runs shielded: a b
 
 - `agentcore/`: loop, registry, executor, hooks mechanism, trace, stores. No hospital words, no hospital imports.
 - `agent_service/`: hospital client, tools, prompts, hooks (ownership, confirmation, 4-hour rule, emergency, one write per turn), router, agents.
+
+## 6. One read tool call (built, Phase 2 commit 1)
+
+```mermaid
+flowchart TD
+    M[Model asks for a read tool + input] --> P{Input valid? no phone field allowed}
+    P -- no --> PF[tool_result: Invalid input, field and rule]
+    P -- yes --> X[Executor: run, one attempt]
+    X --> T[Tool reads phone from ctx.data, never from the model]
+    T -- no phone --> NF[ToolFailed: no verified patient]
+    T --> H[HospitalClient.get, 6s timeout]
+    H -- 2xx --> OK[Strip phone from records, write ids to ctx.data facts, return value]
+    H -- 4xx --> TF[ToolFailed: hospital's error and message, no retry]
+    H -- 5xx --> TR[ToolRetryable: executor retries with backoff]
+    H -- timeout / dropped --> TU[ToolOutcomeUnknown: executor retries with backoff]
+    TR --> X
+    TU --> X
+    TR -. retries used up .-> UA[Failed: unavailable. A read has no verify and is not atomic]
+```

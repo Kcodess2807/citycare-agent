@@ -2,7 +2,7 @@
 
 ## Status
 
-- **Current phase:** 2 (router, agents, handoffs): design agreed, no code yet. Phase 1 is complete: agentcore commits 1 to 8 are pushed and nothing was cut. Phase 1 to 2 quiz passed 9/10 (the one miss: when `verify` itself fails the result is `Unknown`, not `Failed`)
+- **Current phase:** 2 (router, agents, handoffs): design agreed, commit 1 of 6 built (2.11). Phase 1 is complete: agentcore commits 1 to 8 are pushed and nothing was cut. Phase 1 to 2 quiz passed 9/10 (the one miss: when `verify` itself fails the result is `Unknown`, not `Failed`)
 - **Code written:** `agentcore/` config, error and result types, boundary test (commit 1); trace events, cost and trace store (commit 2); session store (commit 3); tool registry (commit 4); hooks (commit 5); retry helper and atomic executor (commit 6); agent loop (commit 7); real-API smoke test (commit 8)
 - **Decided:**
   - Phase 0 (0.1 to 0.5): payment links retry on 503 only and are cached per session; the eval runner uses one session per scenario per run; a timeout on a write is treated like saved-then-503; the booking key is fresh per confirmation and lives in the pending action
@@ -429,3 +429,15 @@ Each commit: `pytest` passes with no API key, this log and `flow.md` updated in 
 Deferred, not cut: the two-strikes counter (2.8, Phase 3). The trace totals are kept (2.7).
 
 **Never cut:** always 200, phone injection, `pytest` passing with no key, docs in the same commit, no write tools.
+
+### 2.11 Build log
+
+**Commit 1: async hospital client and read tools.**
+- `agent_service/hospital.py`: `HospitalClient` on `httpx.AsyncClient`, 6s timeout, one `get` (no write method exists yet, so a write tool can't be added by accident). Outcomes map to agentcore errors: 2xx a value; 5xx `ToolRetryable`; 4xx `ToolFailed` carrying the hospital's `error: message`; timeout or a dropped connection `ToolOutcomeUnknown`. No retries inside the client, the executor owns them. `hospital_client.py` is untouched.
+- `agent_service/tools.py`: `read_tools(client)` returns a registry with `find_doctors`, `free_slots`, `list_appointments`, `list_bills`. All are `idempotent` with the default retry policy, tagged `read`, not atomic.
+- **Own data in code:** no input model has `phone`, so a model-supplied one is a validation error (tested). Personal reads take it from `ctx.data["phone"]`; with none they raise `ToolFailed`. The phone is also removed from the returned records, so the model never has it to repeat.
+- **Facts:** each tool writes the ids it returned into `ctx.data["facts"]` (doctors, slots as `doctor@date`, appointments, bills), keyed by id so repeats overwrite. The tools work without that dict. Merging into `state["facts"]` and bounding it is commit 5.
+- **A read that never answers ends as `Failed`, not `Unknown`:** no `verify` and not atomic, so after retries the executor says "unavailable" (checked through the real `Executor`). The agent can say "I couldn't check", and it never needs a handoff for a read.
+- Bug caught by the tests: a field named `date` clashed with the `date` type in pydantic, so the module is imported as `dt`.
+- Tests: `tests/test_service_tools.py` (17), all on `httpx.MockTransport`, no network, no key. `pytest` 176 passed.
+- Not done: the `strict: true` schema option (see commit 4 of Phase 1), parallel reads.
