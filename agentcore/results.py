@@ -16,9 +16,14 @@ class Done:
 
 @dataclass(frozen=True)
 class Failed:
-    """A definite failure: nothing changed. `reason` is shown to the model."""
+    """A definite failure: nothing changed. `reason` is shown to the model.
+
+    `escalate` is True when the caller should hand the conversation to a person, for example
+    because the call was never started for lack of time.
+    """
 
     reason: str
+    escalate: bool = False
     status: ClassVar[str] = "failed"
 
 

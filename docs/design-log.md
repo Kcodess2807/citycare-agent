@@ -2,8 +2,8 @@
 
 ## Status
 
-- **Current phase:** 1 (agentcore). Commits 1 to 4 of 8 pushed, 5 written but not committed. Deadline for agentcore: 7 pm
-- **Code written:** `agentcore/` config, error and result types, boundary test (commit 1); trace events, cost and trace store (commit 2); session store (commit 3); tool registry (commit 4); hooks (commit 5)
+- **Current phase:** 1 (agentcore). Commits 1 to 5 of 8 pushed, 6 written but not committed. Deadline for agentcore: 7 pm (nothing cut so far, 15:40 on the machine clock)
+- **Code written:** `agentcore/` config, error and result types, boundary test (commit 1); trace events, cost and trace store (commit 2); session store (commit 3); tool registry (commit 4); hooks (commit 5); retry helper and atomic executor (commit 6)
 - **Decided:**
   - Phase 0 (0.1 to 0.5): payment links retry on 503 only and are cached per session; the eval runner uses one session per scenario per run; a timeout on a write is treated like saved-then-503; the booking key is fresh per confirmation and lives in the pending action
   - Phase 1 (1.1 to 1.10): async-only loop, `max_tokens` never sends partial text, effort instead of thinking switches, one atomic executor owns try, retry same key, verify, one result, state saved around writes while history rolls back, policies live in `agent_service` hooks, build order in 1.10
@@ -283,4 +283,20 @@ Each commit: tests pass with no API key, `design-log.md` and `flow.md` updated i
 - **Known limit:** the timeout only works for async hooks. A sync hook that blocks the thread can't be interrupted. Hooks that do I/O (such as reading a clock from the hospital) must be async.
 - Not in this commit: what happens to a Block or Pause. That is the loop's job in commit 7 (a `tool_result` for a blocked call, end of turn on Pause).
 - **Fix made before committing: hooks see live state, not a snapshot.** The first version gave hooks a copy of the state from the start of the turn. In the confirm flow, code marks the pending action confirmed and runs the stored call in the same turn, so a `before_tool` hook would still have seen "awaiting" and blocked the confirmed call. `HookContext.state` is now a `MappingProxyType` over the turn's own state dict (build it with `HookContext.for_turn`). The order in the confirm flow is therefore: change the turn's state, save it with `save_state` (write-ahead, 1.7), then run the call through the hooks. Hooks can't write through the view (top level only; nested values are the turn's objects and hooks must not change them). Tested both ways.
+
+**Commit 6: retry helper and atomic executor.**
+- `retry.py`: one `with_retries(attempt, policy, classify)` for everything retryable, and `backoff_delay` (full jitter: random in `[0, min(cap, base * 2**n)]`). The caller says which exceptions are retryable. It re-raises when the failure is not retryable, its kind is not in `policy.on`, the retries are used up, or there is no time to wait. It never swallows cancellation. The loop will use it for model calls too (commit 7).
+- `executor.py` implements 1.6 exactly:
+  1. attempt; `ToolFailed` stops with `Failed`, no retry and no verify;
+  2. `ToolRetryable` / `ToolOutcomeUnknown` are retried with the same input object only if the tool is `idempotent` and the policy allows that kind. A non-idempotent tool is forced to 0 retries;
+  3. then `verify`, whose answer (`Done` / `Failed` / `Unknown`) is the result. Verify is a read, so it is retried with the tool's policy too, and if it keeps failing, raises something unexpected or returns a non-result, the result is `Unknown`;
+  4. a timeout of one attempt counts as "unknown outcome" (`No answer after Ns.`).
+- **Without a verify:** an `atomic` tool that ended uncertain returns `Unknown` (it may have changed something), a non-atomic one returns `Failed` (a read can't have). This settles the small contradiction in the 1.6 text.
+- **A bug in the tool** (an unexpected exception) is not retried, because a bug repeats, but it is verified, because we can't tell whether it took effect.
+- **Atomic units:** the budget is checked once, before the unit starts, against `reserve_s` (default 30s). If there is less, the tool never runs, nothing is saved, and the result is `Failed(escalate=True)`. Once started, the unit runs as its own task under `asyncio.shield`, with a reference kept so it is not garbage collected. A cancelled caller stops waiting but the unit finishes write, retries, verify and the state save. `Executor.drain()` waits for such leftovers (shutdown and tests). Non-atomic tools check the budget before each attempt and don't retry if the wait would not fit.
+- **Write-ahead state (1.7):** before the write, `state["inflight"] = {tool, input, started_at}` is saved. If that save fails, the write does not run. After the result, `inflight` is removed and `{tool, status, summary, told: false, at}` is appended to `state["outcomes"]`, then saved again. If that second save fails, the outcome stays in the live state and the trace shows an error `state_saved` event. The result is not lost. Both saves are `state_saved` trace events.
+- **Inflight recovery (cut-list item 1) is in, not cut:** `recover_inflight` runs the tool's `verify` on the stored input at the start of a turn and never runs the write again. A tool that is gone, has no verify, or whose stored input is no longer valid gives an `Unknown` outcome.
+- **`Failed` gained an `escalate` flag** (default False), so the loop can tell "refused, say so" from "hand this to a person".
+- Mutation check: replacing `asyncio.shield(unit)` with a plain `await unit` makes the cancel test fail, so that test does guard the shield.
+- Known limit: the 30s `reserve_s` is the design estimate (3 attempts x 6s + backoff + verify). Real numbers come from commit 8.
 
