@@ -1,6 +1,6 @@
 # How a message moves through the system
 
-Status: Phase 2 design agreed (docs/design-log.md, 2.1 to 2.10). Built so far: agentcore (Phase 1, complete) and Phase 2 commits 1 to 3 (hospital client and read tools, section 6; `lock_held` and `history_transform` on the loop, see the notes under section 2; the router, section 7). Sections 2 and 3 are implemented; section 1 is the Phase 2 design, built in six commits (2.10). Updated in the same commit as the code it describes.
+Status: Phase 2 design agreed (docs/design-log.md, 2.1 to 2.10). Built so far: agentcore (Phase 1, complete) and Phase 2 commits 1 to 4 (hospital client and read tools, section 6; `lock_held` and `history_transform` on the loop, see the notes under section 2; the router, section 7; the agents and the facts note, section 8). Sections 2 and 3 are implemented; section 1 is the Phase 2 design, built in six commits (2.10). Updated in the same commit as the code it describes.
 Blocks marked (P2) are built tonight, (P3) in Phase 3.
 
 ## 1. One `/chat` turn (Phase 2 design)
@@ -152,3 +152,26 @@ flowchart TD
 ```
 
 Every attempt is a `model_call` trace event (role router) with tokens and cost. Unusable answers are marked `unusable`.
+
+## 8. What one specialist call receives (built, Phase 2 commit 4)
+
+```mermaid
+flowchart LR
+    subgraph Cached prefix: identical for every patient and turn
+        SP[System prompt: common rules + job. Info also holds hospital_info.md]
+        TL[Tool list: info none, booking 3 reads, billing 1 read]
+    end
+    subgraph Per turn, after the prefix
+        H[History: text only, patient words + replies the patient saw]
+        FN[Facts note: hospital time, doctor, slot, appointment, bill ids]
+        UM[Patient message, markers broken]
+    end
+    SP --> M[Model call]
+    TL --> M
+    H --> M
+    FN --> M
+    UM --> M
+    M --> C[Commit: text_only drops tool traffic, thinking, the note and unseen pre-tool text]
+```
+
+Human handoff makes no model call: the reply is a fixed text in the patient's language, `handoff: true`.
