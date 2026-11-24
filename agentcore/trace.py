@@ -214,7 +214,7 @@ class Span:
 
     async def __aenter__(self) -> Span:
         self._ts = time.time()
-        self._t0 = time.monotonic()
+        self._t0 = time.perf_counter()
         return self
 
     async def __aexit__(self, exc_type, exc, tb) -> bool:
@@ -225,7 +225,7 @@ class Span:
             self.type,
             self.name,
             ts=self._ts,
-            duration_ms=(time.monotonic() - self._t0) * 1000,
+            duration_ms=(time.perf_counter() - self._t0) * 1000,
             status=self.status,
             attempt=self.attempt,
             input=self.input,

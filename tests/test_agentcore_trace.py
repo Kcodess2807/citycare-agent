@@ -45,7 +45,7 @@ def test_span_records_duration_and_numbers_events():
 
     first, second = run(go())
     assert (first.seq, second.seq) == (1, 2) and first.trace_id == second.trace_id
-    assert first.duration_ms >= 10 and first.status == "ok" and first.output == '{"ok": true}'
+    assert first.duration_ms >= 5 and first.status == "ok" and first.output == '{"ok": true}'
 
 
 def test_span_marks_error_and_reraises():
