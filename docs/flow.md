@@ -1,6 +1,6 @@
 # How a message moves through the system
 
-Status: design for Phase 1. Built so far: commits 1 to 6 of 8 (config, errors, result types, trace events and store, session store, tool registry, hooks, executor). Section 3 below is now implemented. The diagrams below are not implemented yet. Updated in the same commit as the code it describes.
+Status: design for Phase 1. Built so far: commits 1 to 7 of 8 (everything in agentcore except the measure script). Sections 2 and 3 below are implemented; section 1 needs the router and service (Phase 2). The diagrams below are not implemented yet. Updated in the same commit as the code it describes.
 Blocks marked (P2) and (P3) arrive in later phases.
 
 ## 1. One `/chat` turn
@@ -44,7 +44,7 @@ flowchart TD
     R -- tool_use --> T[For each tool call, in order]
     T --> H1[before_tool hooks]
     H1 -- Block --> TR1[tool_result: blocked + reason]
-    H1 -- Pause --> TR2[tool_result: not executed, awaiting confirm; status=paused]
+    H1 -- Pause --> TR2[tool_result: the hook's reason; payload held in memory; turn will end paused]
     H1 -- Allow --> EX[Executor, see section 3]
     EX --> TR3[tool_result: done / failed / unknown]
     TR1 --> NEXT[Append tool_use + tool_results together]
@@ -52,6 +52,8 @@ flowchart TD
     TR3 --> NEXT
     NEXT --> S
 ```
+
+Notes on section 2: a `max_tokens` retry counts as a step against the step limit; the paused payload is written to the session state only when the turn ends paused, together with the history that holds the read-back, never when the hook pauses; a failed turn drops the history but keeps what the executor saved.
 
 ## 3. The tool executor (one atomic unit for a write)
 

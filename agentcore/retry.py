@@ -25,12 +25,14 @@ async def with_retries(
     sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
     rng: Callable[[float, float], float] = random.uniform,
     can_wait: Callable[[float], bool] | None = None,
+    min_delay: Callable[[Exception], float | None] | None = None,
 ) -> T:
     """Call `attempt(1)`, then `attempt(2)`, ... until one returns.
 
     `classify` maps an exception to the kind of failure it is, or None if it must not be retried.
     The last exception is re-raised when the failure is not retryable, its kind is not in
     `policy.on`, the retries are used up, or `can_wait(delay)` says there is no time to wait.
+    `min_delay` lets the error ask for a longer wait than the backoff (a server's retry-after).
     Cancellation is never swallowed.
     """
     n = 0
@@ -42,6 +44,8 @@ async def with_retries(
             if kind is None or kind not in policy.on or n >= policy.max_retries:
                 raise
             delay = backoff_delay(policy, n, rng)
+            if min_delay is not None:
+                delay = max(delay, min_delay(e) or 0.0)
             if can_wait is not None and not can_wait(delay):
                 raise
             await sleep(delay)

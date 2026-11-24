@@ -2,8 +2,8 @@
 
 ## Status
 
-- **Current phase:** 1 (agentcore). Commits 1 to 5 of 8 pushed, 6 written but not committed. Deadline for agentcore: 7 pm (nothing cut so far, 15:40 on the machine clock)
-- **Code written:** `agentcore/` config, error and result types, boundary test (commit 1); trace events, cost and trace store (commit 2); session store (commit 3); tool registry (commit 4); hooks (commit 5); retry helper and atomic executor (commit 6)
+- **Current phase:** 1 (agentcore). Commits 1 to 6 of 8 pushed, 7 written but not committed. Deadline for agentcore: 7 pm (nothing cut so far)
+- **Code written:** `agentcore/` config, error and result types, boundary test (commit 1); trace events, cost and trace store (commit 2); session store (commit 3); tool registry (commit 4); hooks (commit 5); retry helper and atomic executor (commit 6); agent loop (commit 7)
 - **Decided:**
   - Phase 0 (0.1 to 0.5): payment links retry on 503 only and are cached per session; the eval runner uses one session per scenario per run; a timeout on a write is treated like saved-then-503; the booking key is fresh per confirmation and lives in the pending action
   - Phase 1 (1.1 to 1.10): async-only loop, `max_tokens` never sends partial text, effort instead of thinking switches, one atomic executor owns try, retry same key, verify, one result, state saved around writes while history rolls back, policies live in `agent_service` hooks, build order in 1.10
@@ -299,4 +299,26 @@ Each commit: tests pass with no API key, `design-log.md` and `flow.md` updated i
 - **`Failed` gained an `escalate` flag** (default False), so the loop can tell "refused, say so" from "hand this to a person".
 - Mutation check: replacing `asyncio.shield(unit)` with a plain `await unit` makes the cancel test fail, so that test does guard the shield.
 - Known limit: the 30s `reserve_s` is the design estimate (3 attempts x 6s + backoff + verify). Real numbers come from commit 8.
+
+**Commit 7: agent loop.**
+- **Shape.** `AgentLoop.run_turn(agent, session_id, user_message, data)` does one turn of one agent: lock the session, load it, settle any interrupted write, then model call -> tool calls -> model call until a reply, then commit. An `AgentSpec` is just `(name, model, system, tools, max_tokens, effort)`. It never raises: every `Exception` becomes a `LoopResult(status="failed", ...)`. `CancelledError` is not an `Exception` and is deliberately not swallowed (tested).
+- **Request.** Only `model`, `max_tokens`, `messages`, `system` (one text block with `cache_control`, which caches tools and prompt together), `tools` and, if set, `output_config.effort`. No `temperature`, `thinking` or `tool_choice` (tested). Calls are non-streaming: the largest `max_tokens` the loop will ever send is 8192.
+- **Stop reasons.** `end_turn`/`stop_sequence`: return the text (an empty reply fails as `empty_reply`). `tool_use`: run the calls. `max_tokens`: drop the response (text or tool call), retry once with `max_tokens` doubled up to 8192, then fail. `pause_turn`: append the partial assistant message and continue. `refusal`, `model_context_window_exceeded`, anything else, and a missing stop reason: fail closed.
+- **Failures and who escalates.** The caller counts consecutive failures (CLAUDE.md: hand off after two in a row), so the loop escalates only where retrying the same thing can't help:
+
+| reason_code | escalate | when |
+|---|---|---|
+| `truncated`, `refused`, `unhandled_stop`, `paused_misuse` | yes | max_tokens twice, refusal, unknown stop reason, tool calls kept coming after a pause |
+| `unknown` tool outcome, or a write not started for lack of time | yes (via `Failed.escalate` / `Unknown`) | even if the turn ends normally |
+| `step_limit`, `budget`, `model_error`, `empty_reply`, `hook_blocked`, `history_invalid`, `internal` | no | the service counts them |
+
+- **Model retries** use the shared `with_retries`: 408, 409, 429, all 5xx (529 included), connection errors and timeouts, 2 retries, backoff 1s doubling to 8s with full jitter. `retry-after` is honoured (the wait is the larger of it and the backoff), and a wait longer than the time left in the turn is not taken. 400 and other 4xx are never retried. The SDK's own retries stay off.
+- **Every `tool_use` gets a `tool_result`, in order:** a result, an error, a hook's Block reason, a Pause reason, "Skipped" for calls after a pause in the same step, "Not run: paused" for calls in a later step, and "Not run: this exact call was already made N times" when the same call is made a third time in a turn (`identical_call_limit`). The wording of Block and Pause results is the hook's. A call that crashes the loop's own handling still gets a generic error result.
+- **Pause, changed from the first design (1.5).** The first version saved the pending payload the moment a hook paused. That is wrong: if the turn then failed, the user would never see the read-back, yet a later "yes" could confirm it. Now the payload is held in memory, checked to be JSON, and stored **only at the end of a turn that ends paused**: state is saved first, then the history with the read-back, and if the history commit fails the earlier `pending` value is put back. A failed turn leaves any earlier `pending` untouched (tested). After a pause only text is allowed: one stray tool call is blocked, a second fails the turn.
+- **Rollback and what the model is told.** The turn works on a copy of the history, so a failed turn stores none of it, while atomic outcomes were already saved by the executor. `LoopResult.outcomes` returns this turn's outcomes. On the next turn, outcomes still marked `told: false` are put in front of the user's message as a plain text note ("System note, not from the user ... - tool: status - summary"). They are marked told only after a successful commit, so a failed turn never makes the model forget one. Told outcomes are capped at the last 20.
+- **Hooks in the loop:** `before_model`/`after_model` Block fails the turn with the hook's reason (`hook_blocked`). `before_tool` Block/Pause and `after_tool` Block become tool results as above.
+- **Trace:** every model call is a `model_call` span with attempt, tokens, cost (priced by the model we asked for) and `stop_reason`; the end of the turn is a `stop` event with the reason code.
+- **Tests** (46 for the loop): every stop reason, step limit, 429 / 529 / connection / timeout retried, 400 not, retry-after, a tool error returned as a result, one result per call including blocked and skipped, pause saves the payload, pause dropped on failure, rollback with surviving state, the never-raises cases (client, garbage response, store commit and load failing, broken tool and hook), cancellation, request shape, thinking blocks unchanged, trace and cost, and two turns of one session not interleaving. `tests/async_fake.py` wraps the provided `tests/fake_claude.py` (untouched) with an async `create` and optional per-call delays.
+- **Mutation checks:** accepting a `max_tokens` reply as final, saving `pending` at pause time, and committing history on a failed turn each make specific tests fail.
+- **Known gaps:** `x-should-retry: false` and an HTTP-date `retry-after` are ignored. `effort` is passed through without checking the value. Router plus specialist inside one session lock is Phase 2 (the router will be a plain `messages.create` call or a second `run_turn` on the same session; to decide there). The thinking-block/history-trimming question is still for commit 8.
 
