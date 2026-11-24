@@ -2,7 +2,7 @@
 
 ## Status
 
-- **Current phase:** 2 (router, agents, handoffs): design agreed, all 6 commits built, one calm run recorded (2.11, 2.12), the haiku vs sonnet comparison moved to after Phase 3. Phase 1 is complete: agentcore commits 1 to 8 are pushed and nothing was cut. Phase 1 to 2 quiz passed 9/10 (the one miss: when `verify` itself fails the result is `Unknown`, not `Failed`)
+- **Current phase:** 3 (safety hooks): design agreed (3.1 to 3.6), commit 1 (emergency detector) built. Phase 2 is done: 6 commits, one calm run (2.11, 2.12); the haiku vs sonnet comparison moved to after Phase 3. Phase 1 is complete: agentcore commits 1 to 8 are pushed and nothing was cut. Phase 1 to 2 quiz passed 9/10 (the one miss: when `verify` itself fails the result is `Unknown`, not `Failed`)
 - **Code written:** `agentcore/` config, error and result types, boundary test (commit 1); trace events, cost and trace store (commit 2); session store (commit 3); tool registry (commit 4); hooks (commit 5); retry helper and atomic executor (commit 6); agent loop (commit 7); real-API smoke test (commit 8)
 - **Decided:**
   - Phase 0 (0.1 to 0.5): payment links retry on 503 only and are cached per session; the eval runner uses one session per scenario per run; a timeout on a write is treated like saved-then-503; the booking key is fresh per confirmation and lives in the pending action
@@ -529,3 +529,23 @@ One run of the 10 given scenarios, calm (no chaos), through `tools/run_eval_with
 3. **The model once dropped the last slot of a list** (scenario 01, turn 1: it listed 5:00 to 7:00pm, then "sorry, my earlier list was incomplete" and added 7:30pm). It fixed itself on a second read. One instance, noted, not acted on.
 
 **Not measured by this run:** chaos (503s, latency, saved-then-503, races), anything involving writes, accuracy on unseen scenarios, and the haiku vs sonnet comparison for the specialists. **The haiku vs sonnet comparison moves to after Phase 3** (decided by the user): without write tools it would compare models on a task they cannot finish, and it costs real money, so it waits for writes and for a go and a stop.
+
+
+---
+
+## Phase 3: safety in code (design agreed 2026-11-24)
+
+### 3.1 Emergency detector (commit 1)
+- **Plain code, first, no model.** `agent_service/emergency.py`, called in `handle()` before the router and before any pending-yes handling. A hit clears `pending`, sends a fixed reply in the patient's language, `emergency=true`, `handoff=true`, trace event `emergency`. The staff-queue record comes with `contact_staff` (commit 4).
+- **How it matches.** Normalise (NFKC, lowercase, punctuation to spaces, apostrophes and nukta dropped, chandrabindu to anusvara, doubled letters collapsed, so "behoooosh" matches). Then three rules: one strong word (*behosh, seizure, zeher, मिर्गी*), a phrase (*cant breathe, dil ka daura, mar jaunga*), or two word groups that both appear anywhere in the message (*seene* + *dard*, *saans* + *nahi*, face + droop). Vocabulary goes through the same normaliser as the message.
+- **Leans to false alarms.** A false alarm costs one reply with 108 in it; a miss costs a patient. No negation handling: "I had chest pain last year" fires. Words that only name a place or a test (*emergency department*, *chest x-ray*, *blood test*, *blood pressure*) do not fire alone, so info questions are not flagged.
+- **Found by our own test, not a given scenario:** "his face is drooping and his speech is slurred" missed (the words were not adjacent). Fixed with a face + droop pair and *slurred* as a strong word. The test table has 33 emergency messages and 15 ordinary ones, written without looking at the 10 scenarios.
+- **Known limit (for DESIGN.md):** spellings not in the lists and typos beyond doubled letters are missed. The second layer (a router `emergency_suspected` field) is **not built yet**. It is cut-list item 1.
+- **Reply language:** Devanagari anywhere gives Hindi; two or more common Hinglish words give Hinglish; otherwise English. Each reply says 108, nearest ER, the 24-hour Emergency department at the main entrance, and gives no advice.
+
+### 3.2 Agreed with the user (changes to my first proposal)
+- **Confirmed write: code runs the stored action itself.** My first draft had the model call the write tool again after "yes", with a hook allowing it. That moved away from 1.5, which says code runs the stored payload. The reason was convenience (the model phrases the result, the hooks stay in one place). It was the wrong trade: a model that skips the call or words the outcome loosely breaks "never say something happened when it didn't". Back to 1.5: on a strict yes, code runs the stored action through the same registry, hooks and executor. The reply about a write comes from the real result: "booked" only on `Done`, a handoff on `Unknown`.
+- **Strict yes is a vocabulary test, not a list of whole messages.** Every word must be in a small agreeing vocabulary (English, Hindi, Hinglish) and at least one must be a yes word. Any other word, any digit or a "?" means not a yes ("yes please book it" passes, "yes but make it 6" does not).
+- **A blocked id says one thing.** Someone else's id and an id that does not exist get the same reason, and it never repeats a doctor, time or name.
+- **Payment link after a timeout:** `Unknown`, handoff.
+- **One extra model call after a pause or a code-set handoff** is accepted (about $0.001 per write); its text is discarded.

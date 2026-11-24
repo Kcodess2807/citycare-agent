@@ -357,11 +357,15 @@ def test_the_human_route_sets_handoff_and_calls_no_specialist(language):
     assert rig.history()[-1] == {"role": "assistant", "content": r.reply}
 
 
-# ---- emergency call site (the real check is Phase 3)
+# ---- emergency call site (the detector itself is tested in test_emergency.py)
 
 
-def test_the_stub_never_fires():
-    assert emergency.check_emergency("I have chest pain and cannot breathe") is None
+def test_a_real_emergency_message_never_reaches_a_model():
+    rig = Rig([])  # an empty script: any model call would fail the test
+    r = rig.chat("Mujhe seene mein bahut dard ho raha hai aur saans lene mein taklif hai")
+    check_contract(r)
+    assert (r.agent, r.handoff, r.emergency) == ("safety", True, True) and "108" in r.reply
+    assert rig.calls == []
 
 
 def test_a_hit_skips_the_router_clears_pending_and_flags_everything(monkeypatch):

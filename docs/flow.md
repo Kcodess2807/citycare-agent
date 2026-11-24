@@ -10,8 +10,8 @@ The service takes the session lock once for the whole turn. `run_turn` is told t
 ```mermaid
 flowchart TD
     A[POST /chat: session_id, phone, message] --> L[Take the session lock, load state]
-    L --> E[Emergency check: stub returns None tonight, real check P3]
-    E -- emergency P3 --> X[Fixed reply: call 108, emergency=true, handoff, clear pending]
+    L --> E[Emergency check: keyword code, en/hi/hinglish, no model]
+    E -- emergency --> X[Fixed reply: call 108, emergency=true, handoff, clear pending]
     E -- ok --> R[Router: haiku, structured output: agent + language]
     R -- unusable output --> RF[Fallback: last turn's agent, else info]
     R -- ok --> S
@@ -182,7 +182,7 @@ Human handoff makes no model call: the reply is a fixed text in the patient's la
 flowchart TD
     A[POST /chat: session_id, phone, message] --> K[Storage key = sha256 of phone + session_id]
     K --> L[Take that key's lock, load history + state]
-    L --> E{emergency check: stub returns None}
+    L --> E{emergency check: keyword code (agent_service/emergency.py)}
     E -- hit --> X[Clear pending, fixed reply, agent safety, emergency + handoff]
     E -- none --> R[Router, same Tracer]
     R -- human --> H[Fixed reply in the patient's language, handoff true]
