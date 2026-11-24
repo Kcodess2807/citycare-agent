@@ -260,3 +260,14 @@ flowchart TD
 ```
 
 At the yes the gate checks again, so an appointment that moved inside 4 hours after the read-back goes to staff instead of running.
+
+## Phase 3: how the write tools reach an agent (commit 4b)
+
+```mermaid
+flowchart LR
+    S[ChatService start] --> H[HookRunner] --> I[Gate.install: confirm_gate at before_tool]
+    I --> B{build_agents with write tools}
+    B -- hooks has confirm_gate --> OK[booking: book, reschedule, cancel. billing: payment link]
+    B -- no gate --> ERR[ValueError at start-up]
+    OK --> T[Model calls a write tool] --> G[Gate: pause, nothing runs] --> Y[Next message: strict yes, code runs the stored action]
+```

@@ -68,7 +68,6 @@ def service(clinic, script):
 
     fake = AsyncFake(script)
     svc = ChatService(fake, InMemorySessionStore(), InMemoryTraceStore(), clinic.client, sleep=nosleep, rng=lambda lo, hi: lo)
-    svc.agents = build_agents(read_tools(clinic.client), svc.writes)  # write tools given to the agents, as 4b does by default
     return svc, fake
 
 

@@ -51,7 +51,7 @@ def fresh():
 
 
 class Rig:
-    """The real service, with write tools handed to the agents (the default wiring does not do that yet)."""
+    """The real service. Its default agents carry the write tools, behind the gate."""
 
     def __init__(self, script_=None):
         self.wire = Wire()
@@ -63,7 +63,6 @@ class Rig:
             pass
 
         self.svc = ChatService(self.fake, self.store, self.traces, self.hospital, sleep=nosleep, rng=lambda lo, hi: lo)
-        self.svc.agents = build_agents(read_tools(self.hospital), self.svc.writes)
 
     def say(self, message, *replies, phone=PHONE, sid="s"):
         """Queue the model's replies for this message, then send it."""

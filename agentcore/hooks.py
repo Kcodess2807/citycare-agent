@@ -127,6 +127,10 @@ class HookRunner:
     def add(self, point: HookPoint, hook: Hook, name: str | None = None) -> None:
         self._hooks.setdefault(point, []).append((name or getattr(hook, "__name__", "hook"), hook))
 
+    def has(self, point: HookPoint, name: str) -> bool:
+        """Is a hook with this name registered at this point? Lets a caller refuse to start without one."""
+        return any(n == name for n, _ in self._hooks.get(point, []))
+
     async def run(self, point: HookPoint, ctx: HookContext, event: Any, tracer: Tracer | None = None) -> HookResult:
         for name, hook in self._hooks.get(point, []):
             t0 = time.perf_counter()

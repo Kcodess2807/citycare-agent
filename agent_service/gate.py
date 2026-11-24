@@ -22,7 +22,7 @@ from pydantic import BaseModel
 
 from agent_service import confirm
 from agent_service.hospital import HospitalClient
-from agentcore import Allow, Block, HookContext, Pause, RetryPolicy, ToolError, ToolFailed
+from agentcore import Allow, Block, HookContext, HookRunner, Pause, RetryPolicy, ToolError, ToolFailed
 from agentcore.hooks import ToolCallEvent
 from agentcore.retry import with_retries
 
@@ -35,6 +35,7 @@ PAID = f"That bill is already paid. {NOTHING}"
 CANT_CHECK = f"Could not check the record just now. {NOTHING} Try again shortly."
 # The 4-hour rule (CLAUDE.md): inside 4 hours, or already started, only staff change it. Exactly 4 hours is allowed.
 # The reply and the handoff are set by code from these kinds, never by the model (prompts.staff_reply).
+GATE_HOOK = "confirm_gate"  # the name it is registered under, so build_agents can tell it is installed
 SOON, CLOCK = "soon", "clock"
 FOUR_HOURS = dt.timedelta(hours=4)
 TOO_SOON = f"That appointment starts within 4 hours or has already started, so only staff can change it. The system tells the patient and passes the chat to staff. {NOTHING}"
@@ -66,6 +67,9 @@ class Gate:
         rng: Callable[[float, float], float],
     ) -> None:
         self._h, self._sleep, self._rng = hospital, sleep, rng
+
+    def install(self, hooks: HookRunner) -> None:
+        hooks.add("before_tool", self.before_tool, GATE_HOOK)
 
     async def _get(self, path: str, **params: Any) -> Any:
         async def attempt(n: int) -> Any:

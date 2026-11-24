@@ -55,11 +55,11 @@ class ChatService:
     ):
         self.config = config or RuntimeConfig()
         self.client, self.store, self.traces, self.hospital = client, store, traces, hospital
-        self.agents = agents if agents is not None else build_agents(read_tools(hospital))
-        self.writes = write_tools(hospital)  # not given to any agent unless the caller builds agents with them
+        self.writes = write_tools(hospital)
         self.gate = Gate(hospital, sleep, rng)
         hooks = HookRunner(self.config.hook_timeout_s)
-        hooks.add("before_tool", self.gate.before_tool, "confirm_gate")
+        self.gate.install(hooks)  # before the agents: build_agents refuses write tools without it
+        self.agents = agents if agents is not None else build_agents(read_tools(hospital), self.writes, hooks=hooks)
         self.loop = AgentLoop(client, store, traces, hooks=hooks, config=self.config, sleep=sleep, rng=rng)
         self._sleep, self._rng = sleep, rng
 

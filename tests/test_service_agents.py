@@ -85,9 +85,7 @@ def test_every_prompt_carries_the_common_rules(name):
         assert needle in s
 
 
-def test_write_agents_say_they_cannot_change_anything_yet():
-    assert "cannot book, reschedule or cancel yet" in prompts.BOOKING
-    assert "cannot send payment links" in prompts.BILLING
+def test_booking_prompt_still_says_to_look_up_slots_first():  # the write wording is tested in test_injection.py
     assert "Always call free_slots before you offer a time" in prompts.BOOKING
 
 

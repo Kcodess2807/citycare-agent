@@ -222,13 +222,15 @@ def test_all_four_are_atomic_writes():
     assert all(reg.get(n).atomic and "write" in reg.get(n).tags for n in reg.names())
 
 
-def test_the_default_agents_have_no_write_tool_yet():
-    """They get them in commit 4, together with the 4-hour rule and the prompts. The gate (test_confirm.py) is already in place."""
+def test_the_default_agents_get_the_write_tools_and_each_only_its_own():
     from agent_service.service import ChatService
     from agentcore.session import InMemorySessionStore
     from agentcore.trace import InMemoryTraceStore
 
-    hospital = HospitalClient(base_url="http://h")
-    for agents in (build_agents(read_tools(hospital)), ChatService(None, InMemorySessionStore(), InMemoryTraceStore(), hospital).agents):
-        for spec in agents.values():
-            assert not set(spec.tools.names()) & set(WRITE_TOOL_NAMES)
+    agents = ChatService(None, InMemorySessionStore(), InMemoryTraceStore(), HospitalClient(base_url="http://h")).agents
+    assert agents["booking"].tools.names() == [
+        "find_doctors", "free_slots", "list_appointments", "contact_staff",
+        "book_appointment", "reschedule_appointment", "cancel_appointment",
+    ]
+    assert agents["billing"].tools.names() == ["list_bills", "contact_staff", "create_payment_link"]
+    assert agents["info"].tools.names() == ["contact_staff"]

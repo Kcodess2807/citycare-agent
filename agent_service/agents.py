@@ -7,7 +7,8 @@ haiku for now; the haiku vs sonnet comparison happens at the end of Phase 2 with
 from __future__ import annotations
 
 from agent_service import prompts
-from agentcore import ToolRegistry
+from agent_service.gate import GATE_HOOK
+from agentcore import HookRunner, ToolRegistry
 from agentcore.loop import AgentSpec
 
 SPECIALIST_MODEL = "claude-haiku-5-5"
@@ -20,9 +21,8 @@ TOOLS = {
     "billing": ["list_bills", "contact_staff"],
 }
 
-# Only given to an agent when the caller passes a write registry. The default wiring does not (commit 4
-# adds them together with the 4-hour rule and the prompts). Even then a write tool never runs on the
-# model's call: the gate in `gate.py` turns it into a pending action (design-log 3.2).
+# A write tool never runs on the model's call: the gate in `gate.py` turns it into a pending action
+# (design-log 3.2). So `build_agents` refuses to hand them out unless that gate is installed.
 WRITE_TOOLS = {
     "booking": ["book_appointment", "reschedule_appointment", "cancel_appointment"],
     "billing": ["create_payment_link"],
@@ -39,7 +39,12 @@ def _subset(reg: ToolRegistry, names: list[str]) -> ToolRegistry:
     return sub
 
 
-def build_agents(read_tools: ToolRegistry, write_tools: ToolRegistry | None = None) -> dict[str, AgentSpec]:
+def build_agents(
+    read_tools: ToolRegistry, write_tools: ToolRegistry | None = None, *, hooks: HookRunner | None = None
+) -> dict[str, AgentSpec]:
+    """`hooks` is the runner the agents will run under. With write tools it must have the confirmation gate."""
+    if write_tools is not None and not (hooks is not None and hooks.has("before_tool", GATE_HOOK)):
+        raise ValueError("write tools need the confirmation gate installed on the hook runner")
     pool = ToolRegistry()
     for source in (read_tools, write_tools):
         for name in source.names() if source else []:
