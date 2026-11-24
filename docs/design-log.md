@@ -2,16 +2,15 @@
 
 ## Status
 
-- **Current phase:** 0 (understand) done, quiz passed (8.7/10). Next: Phase 1 design discussion, no code yet
+- **Current phase:** 1 (agentcore). Design agreed, waiting for the user's "go". No code yet
 - **Code written:** none yet
 - **Decided:**
-  - 0.1 and 0.4: payment links. Retry on 503, never auto-retry on timeout (hand off), cache `bill_id -> link` per session
-  - 0.2: the eval runner uses one session id per scenario per run
-  - 0.3: hospital client timeout above 2s; a timeout on a write is treated like saved-then-503
-  - 0.5: booking idempotency key is fresh per confirmation, stored in a pending action
+  - Phase 0 (0.1 to 0.5): payment links retry on 503 only and are cached per session; the eval runner uses one session per scenario per run; a timeout on a write is treated like saved-then-503; the booking key is fresh per confirmation and lives in the pending action
+  - Phase 1 (1.1 to 1.10): async-only loop, `max_tokens` never sends partial text, effort instead of thinking switches, one atomic executor owns try, retry same key, verify, one result, state saved around writes while history rolls back, policies live in `agent_service` hooks, build order in 1.10
 - **Open:**
-  - Client timeout, retry count, backoff and per-turn budget (Phase 1)
-  - How code detects a clear yes (Phase 3)
+  - Real values for timeouts and turn budget: provisional now, set from `tools/measure.py` (commit 8)
+  - Does trimming history break the thinking-block check? Test with one real call (commit 8)
+  - Phase 3: how code detects a clear yes, and what to do when the model's read-back differs from the stored payload
 
 Each entry: the decision or question, the alternatives, why, and what failed.
 Newest at the bottom. Entries are answers verified against the code, not memory.
@@ -137,3 +136,94 @@ Only `POST /appointments` honours `idempotency_key`. Two ways to make one:
 - Reschedule: if the appointment's `start` equals the requested time, it worked. A blind retry would return 409 `slot_taken` because our own booking holds the slot.
 
 **Open:** how code detects "a clear yes" (a `confirm` tool the model must call, or code matching the patient's reply to the pending action). Decide in the Phase 3 design.
+
+---
+
+## Phase 1: agentcore design (no code yet)
+
+All numbers are provisional until measured (1.4). Every one lives in a config object, none is hard-coded in the loop.
+
+### 1.1 One async loop, a sync fake
+- The loop is async only: `await client.messages.create(...)` on `AsyncAnthropic`, `httpx.AsyncClient` for the hospital. SDK `max_retries=0`, we own retries.
+- `tests/fake_claude.py` is provided and sync. We do not edit it. A small test-side adapter (`AsyncFake`) wraps a `FakeClaude` and exposes `async create(**kw)` that calls the sync one. It keeps `.messages.calls`, and scripted exceptions still raise.
+- Rejected: `if inspect.isawaitable(r)` inside the loop. Production code would bend to a test helper.
+- Backoff sleeps go through an injectable `sleep`, so retry tests don't wait.
+
+### 1.2 `max_tokens` never sends partial text (supersedes the first draft)
+- On `stop_reason == "max_tokens"`: discard the response (never append it to history, never show it). Retry that step once with double `max_tokens` (capped at 8192). If it truncates again, fail the turn with a handoff.
+- A truncated `tool_use` is discarded the same way, so a cut-off call never runs.
+
+### 1.3 Thinking and effort (checked against the docs, 2026-11)
+- Thinking tokens count inside `max_tokens` and are billed as output tokens, even when `display` is omitted. So `max_tokens=1024` was too low. New caps: router 1024, specialists 4096. They are ceilings, not targets. Short WhatsApp replies come from the prompt.
+- Sonnet 5.5: `thinking: disabled` returns 400 (`between_tools` is the off switch, effort `high` or below). Haiku 5.5: adaptive by default, `disabled` allowed at `high` or below. Neither accepts non-default `temperature`/`top_p`. We send none.
+- The docs say prompt text like "don't think" is unreliable on these models. Effort is the lever. Changing effort mid-conversation invalidates the prompt cache, so effort is fixed per agent.
+- Decision: do not pass `thinking`. Set `output_config.effort` per agent: router `low`, specialists start at `low` and are raised only if measurement shows a quality gap. Trace records `usage.output_tokens_details.thinking_tokens` so we can see what thinking costs.
+- Thinking blocks must go back to the API unchanged inside a tool loop. **Open risk:** the history-editing check (trimming old messages, stripping blocks) may reject edited history. Verify with one real call early in Phase 1. Fallback: trim only at turn boundaries.
+
+### 1.4 Latency numbers and how we measure
+- The earlier "10-20s" (Sonnet with thinking) and "3-6s" (no thinking) were two unmeasured guesses. Provisional config: model call timeout 60s, turn budget 90s (runner waits 180s), step limit 8, model retries 2 (3 attempts), backoff `min(8s, 1s*2^n)` with full jitter and `retry-after` honoured, hospital timeout 6s.
+- Measure: every trace event has duration and tokens. A small `tools/measure.py` (Phase 1 end) sends about 5 canned conversations through the real loop against the mock with chaos on, for each candidate model/effort, and prints p50/p95 per model call, per tool call and per turn, plus cost. Estimated cost under $0.30.
+- After that, timeouts become about 2-3x the measured p95, and the turn budget is set from the p95 of a full booking turn.
+
+### 1.5 Hook results and pause/resume
+- Three named hook results, each its own type: `Allow`, `Block(reason)`, `Pause(reason, payload)`. The loop handles Block and Pause through shared code (the call is not run and still gets a `tool_result`), but Pause is its own type because it also ends the turn as `status="paused"`.
+- **`payload` is opaque.** The runtime stores it untouched in `session.state["pending"]`, it must be JSON-serialisable, and the runtime never reads a field of it. What it contains (params, read-back facts, idempotency key, expiry, replace/clear rules) is defined by `agent_service`, so agentcore imports no hospital types.
+- After a Pause the model gets a `tool_result` ("Not executed: awaiting patient confirmation") for that call and "skipped" for the others in the step. It then writes the read-back in the patient's language. After a pause only text is allowed. A further tool call is blocked again, and a second one fails the turn to handoff.
+- **History invariant:** an assistant `tool_use` message and its user `tool_result` message are appended together, and every `tool_use` id always gets a result (success, error, blocked, skipped, timeout). History is built on a copy and committed at the end of the turn after a pairing check.
+- **On "yes":** code runs the stored payload through `execute_tool(name, input)`, which uses the same registry, hooks and trace. The result goes back to the model as plain text context, so no invented `tool_use` is added to history. How code recognises the yes is Phase 3.
+
+### 1.6 The atomic unit: who owns the order (merges the old 1.6 and 1.7)
+Ownership is split on purpose. **The registry executor owns the order. The tool supplies two small functions and a policy.** Hospital knowledge stays in the tool, order and retry logic stay in agentcore.
+
+A tool declares: `run(input, ctx)` (one attempt), optional `verify(input, ctx, last_error)`, `retry` (max retries, backoff, which failures to retry), `idempotent`, `atomic`, `reserve_s`, and opaque `tags`. A failing `run` raises one of three agentcore errors: `ToolFailed` (definite: nothing changed, e.g. 409), `Retryable` (the attempt failed, outcome not certain, e.g. 503) or `Unknown` (timeout or dropped connection).
+
+The executor, for every call:
+1. Attempt `run`.
+2. `ToolFailed`: stop. The result is a definite failure. No verify, because nothing changed.
+3. `Retryable` or `Unknown`: if the tool is `idempotent`, the policy allows that failure kind and attempts remain, back off and run again **with the same input object**. For `book` that input holds the stored key, so a repeat can only return the same booking.
+4. Retries used up, or the tool is not idempotent: call `verify`, if the tool has one. A tool with no `verify` (reads) returns a definite "unavailable".
+5. The result is exactly one of `Done(value)`, `Failed(reason)` or `Unknown`. `Unknown` only happens if verify itself fails, or the tool has no verify and the outcome is uncertain. It becomes an error `tool_result` and the loop asks for a handoff.
+
+Examples:
+- `book`: idempotent, retries 503 and timeout with the same key, then verifies via `list_appointments`.
+- `reschedule`, `cancel`: not idempotent, so no retry. A 503 goes straight to verify.
+- `payment_link`: idempotent for 503 only, a timeout is not retried and there is no verify, so a timeout ends as `Unknown` and a handoff (0.4).
+
+`atomic=True` makes steps 1 to 5 one shielded unit (`asyncio.shield`): turn-budget expiry, a client disconnect or a cancel can't stop it between write and verify. The budget is checked only before an atomic call starts. It starts only if the remaining budget is at least its `reserve_s` (about 30s for writes: 3 attempts x 6s + backoff + verify 6s). Otherwise nothing is changed and the patient gets a handoff.
+
+Retries for model calls use the same `with_retries` helper. The hospital client has no retries of its own: 6s timeout and typed errors only.
+
+### 1.7 State is saved before and after a write, history is not
+- Session `state` and `history` are saved separately. A failed turn rolls back **history only**.
+- Around every atomic call the runtime saves state twice. Before: `state["inflight"] = {tool, input, started_at}`. After: it clears `inflight` and appends to `state["outcomes"]` the tool name, status (`done`/`failed`/`unknown`) and the tool's result summary, flagged `told=false`. Each save writes a `state_saved` trace event.
+- If a turn then fails and history rolls back, the outcome is still stored. `LoopResult.outcomes` exposes it so the service can tell the patient honestly ("your booking went through, I couldn't finish the message"). On the next turn, code adds every `told=false` outcome to the context as plain text and marks it told, so the model never rebooks something that already happened.
+- If `inflight` is still set at the start of a turn (crash or cancel mid-write), the runtime calls that tool's `verify` with the stored input first, records the outcome, and only then lets the model run.
+
+### 1.8 What is policy and stays out of agentcore
+- agentcore holds mechanisms only: hooks, `atomic`, `idempotent`, retry, `verify`, opaque `tags` and opaque `payload`. It never interprets a tag.
+- **One write per turn** is a `before_tool` hook in `agent_service` that counts calls whose tags contain `write` and blocks the second ("one change at a time, confirm each"). Ownership, the 4-hour rule, confirmation and the emergency check are hooks in `agent_service` too.
+- A test asserts that nothing under `agentcore/` imports `agent_service` or `mock_hospital`, and that none of its source mentions hospital words.
+- Tools in a step run sequentially in the model's order. Parallel reads would save about 1.2s each under chaos. Revisit if the measured turn p95 is dominated by reads.
+
+### 1.9 Traces outlive sessions
+- `TraceStore` is its own interface, separate from `SessionStore`. Sessions expire after 30 min idle. Traces don't expire with them.
+- Default: in-memory, LRU capped at 1000 sessions, plus an append-only JSONL file under `traces/` (gitignored, it holds phone numbers) so a failing eval case can still be explained after a restart.
+- `GET /trace/{session_id}` reads from the `TraceStore`.
+
+### 1.10 Build order, one commit per piece
+Each commit: tests pass with no API key, `design-log.md` and `flow.md` updated in the same commit, and I stop for the user's ok before committing.
+
+| # | Commit | Contains |
+|---|---|---|
+| 1 | Add agentcore config and error types | `RuntimeConfig` (all numbers), `ToolFailed`/`Retryable`/`Unknown`, result types, the import-boundary test |
+| 2 | Add trace events and trace store | event types, cost table, in-memory LRU + JSONL `TraceStore` |
+| 3 | Add session store with split state and history | interface, in-memory store, TTL, per-session lock, atomic history commit with pairing check |
+| 4 | Add tool registry with pydantic validation | `Tool` spec, JSON schema, validation errors returned to the model |
+| 5 | Add hook results and hook runner | `Allow`/`Block`/`Pause`, ordering, fail-closed on a crashing hook |
+| 6 | Add atomic tool executor with retry and verify | `with_retries`, the 1.6 order, shield, `reserve_s`, write-ahead state, inflight recovery |
+| 7 | Add agent loop with every stop reason | step limit, budget, `max_tokens` retry, refusal, pause, rollback; plus the `AsyncFake` test adapter |
+| 8 | Add measure script and thinking-history check | `tools/measure.py`; needs the user's ok before any real API spend |
+
+### Notes carried forward to Phase 3
+- The model's read-back may differ from the stored payload (wrong doctor, time or amount). The patient says yes to what they read, and the code runs what is stored. Options: code renders the canonical facts and an `after_model` hook checks the reply contains them, or code sends the read-back itself. Decide in Phase 3.
+- How code recognises a clear yes (a `confirm` tool, or matching the reply to the pending action).
