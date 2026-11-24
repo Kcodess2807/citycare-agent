@@ -251,3 +251,11 @@ def test_every_attempt_is_traced_and_an_unusable_answer_is_marked():
     assert (first.status, first.attempt, first.usage) == ("error", 1, None)
     assert (second.status, second.attempt) == ("unusable", 2) and second.output == "garbage"
     assert second.usage is not None and second.cost_usd is not None  # tokens were spent, so they are counted
+
+
+def test_the_router_prompt_keeps_billing_to_the_callers_own_bills_and_sends_general_money_questions_to_info():
+    from agent_service.router import SYSTEM
+
+    assert "only the caller's own bills and payment links" in SYSTEM
+    assert "General questions about costs, payment methods or policy are not billing: they are info" in SYSTEM
+    assert "costs, payment methods, policies" in SYSTEM.split("- info:")[1].split("\n")[0]

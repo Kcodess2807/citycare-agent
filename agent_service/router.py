@@ -45,8 +45,8 @@ SYSTEM = """You route messages for a hospital's WhatsApp assistant. Reply with J
 
 agent:
 - booking: book, reschedule or cancel an appointment, find a doctor, ask about free slots or the patient's own appointments.
-- billing: bills, payments, payment links, amounts due.
-- info: general questions about the hospital (timings, address, departments, fees, policies).
+- billing: only the caller's own bills and payment links (what they owe, whether a bill is paid, a payment link). General questions about costs, payment methods or policy are not billing: they are info.
+- info: general questions about the hospital (timings, address, departments, fees, costs, payment methods, policies).
 - human: the patient asks for a person, staff, a call back, or is clearly upset or angry.
 
 language: the language the patient writes in. en = English, hi = Hindi in Devanagari, hinglish = Hindi written in Latin letters (or mixed with English).
