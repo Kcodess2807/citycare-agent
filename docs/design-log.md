@@ -2,8 +2,8 @@
 
 ## Status
 
-- **Current phase:** 1 (agentcore). Commits 1 and 2 of 8 done (2 not yet committed). Deadline for agentcore: 7 pm
-- **Code written:** `agentcore/` config, error and result types, boundary test (commit 1); trace events, cost and trace store (commit 2)
+- **Current phase:** 1 (agentcore). Commits 1 and 2 of 8 pushed, 3 written but not committed. Deadline for agentcore: 7 pm
+- **Code written:** `agentcore/` config, error and result types, boundary test (commit 1); trace events, cost and trace store (commit 2); session store (commit 3)
 - **Decided:**
   - Phase 0 (0.1 to 0.5): payment links retry on 503 only and are cached per session; the eval runner uses one session per scenario per run; a timeout on a write is treated like saved-then-503; the booking key is fresh per confirmation and lives in the pending action
   - Phase 1 (1.1 to 1.10): async-only loop, `max_tokens` never sends partial text, effort instead of thinking switches, one atomic executor owns try, retry same key, verify, one result, state saved around writes while history rolls back, policies live in `agent_service` hooks, build order in 1.10
@@ -251,4 +251,16 @@ Each commit: tests pass with no API key, `design-log.md` and `flow.md` updated i
 - The JSONL write is a blocking call inside async code (marked `TODO:` in the source). Revisit if it shows up in measured latency.
 - The LRU cap is on the 7 pm cut list, but it is about 4 lines, so it stays.
 - `summarize(events)` totals a session over all its turns: turns (distinct trace ids), model and tool call counts, errors, token usage (including thinking tokens), cost and summed call time. Calls with tokens but no price are counted in `unpriced_calls`, so a nonzero value means the cost is a lower bound.
+
+**Commit 3: session store.**
+- A `Session` is `{session_id, messages, state}`. The store has `load`, `save_state`, `commit_history`, `delete` and a per-session `lock`. State and history are saved by different calls, so a failed history commit leaves the state exactly as it was saved (tested).
+- **Everything stored is JSON.** Input and output both go through a JSON round trip. So `load` returns a copy (changing it changes nothing until saved), and a payload that is not JSON fails at save time with `SessionError`, as the opaque `pending` payload must. This is what a Redis store would do too.
+- **History is plain dicts, not SDK objects.** The loop (commit 7) will turn response blocks into dicts before appending.
+- **The pairing check** (`check_history`) rejects a history where a tool call has no result in the next message, a result has no call before it, the ids don't match (missing or extra), the first message is not a user message, or a role/content is invalid. `commit_history` runs it first and stores nothing on failure.
+- **Trimming** (`trim_history`) runs at commit time, down to `history_cap_messages` (40). It cuts only at the start of a turn (a user message that is not a tool result), so a call is never separated from its result. One very long turn is kept whole rather than split. This is cut-list item 2: it was about 10 lines, so it stays. **Still open:** whether trimming breaks the thinking-block check, to be tested with the real API in commit 8.
+- **TTL:** 30 minutes idle, counted from the last write (`save_state` or `commit_history`; `load` does not refresh it). Expiry is checked lazily on access, plus `purge_expired()`. When a session expires its state goes with it, so a pending confirmation older than 30 minutes is gone.
+- The idle clock is `time.monotonic` and injectable. It is machine time on purpose: it measures idleness, not hospital time.
+- Locks: one `asyncio.Lock` per session id, kept until `delete` or a purge of an expired session. A lock held by a running turn is never dropped.
+- Bug caught by the tests: `purge_expired` deleted from the dict it was iterating over.
+- **For DESIGN.md (what is missing before real patients):** the per-session lock is in-process (`asyncio.Lock`). With a Redis session store and several service instances, two instances could handle two messages of one session at once. A shared lock (for example a Redis lock with an expiry) or sticky routing by session id is needed first. The same applies to the in-memory trace store, which is per process.
 
