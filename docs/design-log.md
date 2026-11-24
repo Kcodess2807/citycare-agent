@@ -2,7 +2,7 @@
 
 ## Status
 
-- **Current phase:** 2 (router, agents, handoffs): design agreed, commit 1 of 6 built (2.11). Phase 1 is complete: agentcore commits 1 to 8 are pushed and nothing was cut. Phase 1 to 2 quiz passed 9/10 (the one miss: when `verify` itself fails the result is `Unknown`, not `Failed`)
+- **Current phase:** 2 (router, agents, handoffs): design agreed, commits 1 and 2 of 6 built (2.11). Phase 1 is complete: agentcore commits 1 to 8 are pushed and nothing was cut. Phase 1 to 2 quiz passed 9/10 (the one miss: when `verify` itself fails the result is `Unknown`, not `Failed`)
 - **Code written:** `agentcore/` config, error and result types, boundary test (commit 1); trace events, cost and trace store (commit 2); session store (commit 3); tool registry (commit 4); hooks (commit 5); retry helper and atomic executor (commit 6); agent loop (commit 7); real-API smoke test (commit 8)
 - **Decided:**
   - Phase 0 (0.1 to 0.5): payment links retry on 503 only and are cached per session; the eval runner uses one session per scenario per run; a timeout on a write is treated like saved-then-503; the booking key is fresh per confirmation and lives in the pending action
@@ -441,3 +441,12 @@ Deferred, not cut: the two-strikes counter (2.8, Phase 3). The trace totals are 
 - Bug caught by the tests: a field named `date` clashed with the `date` type in pydantic, so the module is imported as `dt`.
 - Tests: `tests/test_service_tools.py` (17), all on `httpx.MockTransport`, no network, no key. `pytest` 176 passed.
 - Not done: the `strict: true` schema option (see commit 4 of Phase 1), parallel reads.
+
+**Commit 2: two generic options on `run_turn`.**
+- `lock_held=True`: the caller already holds `store.lock(session_id)`, so the loop does not take it (the lock is not re-entrant, nesting would deadlock). The loop never releases a lock it did not take (tested). Default is unchanged.
+- `history_transform(messages) -> messages`: applied in `_commit` only, so the model sees the full messages during the turn (tool calls, thinking blocks, any note) and the store gets the transformed list. It runs for done and paused turns, before the store's pairing check, so a transform that breaks the history rules is rejected by `check_history` like any other bad history. The service will pass one that keeps text only and strips the facts note (2.4).
+- **A transform that raises** fails the turn as `history_invalid` with only the exception type in the reason (its message could hold private text), stores nothing, and a paused turn puts the earlier `pending` back, same as any failed commit.
+- **Bug caught while writing it:** the first version wrapped the store call in the same `except Exception` as the transform, so a store that crashes was reported as `history_invalid` instead of `internal`. The existing never-raises test caught it. The two are now separate.
+- agentcore only knows "a function over a list of dicts". What a note or a text-only history means stays in `agent_service` (boundary test passes).
+- Tests: 6 added in `tests/test_agentcore_loop.py` (lock held, lock not released, transform stored vs seen, broken transform, store rejects a bad transform, paused turn). Mutation checks: ignoring `lock_held` fails 2 tests (the second needed a timeout so it fails instead of hanging), skipping the transform fails 4. `pytest` 182 passed.
+- Not done: a transform for failed turns (nothing is committed on a failure, so there is nothing to transform).

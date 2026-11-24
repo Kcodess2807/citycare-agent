@@ -1,6 +1,6 @@
 # How a message moves through the system
 
-Status: Phase 2 design agreed (docs/design-log.md, 2.1 to 2.10). Built so far: agentcore (Phase 1, complete) and Phase 2 commit 1 (hospital client and the four read tools, section 6). Sections 2 and 3 are implemented; section 1 is the Phase 2 design, built in six commits (2.10). Updated in the same commit as the code it describes.
+Status: Phase 2 design agreed (docs/design-log.md, 2.1 to 2.10). Built so far: agentcore (Phase 1, complete) and Phase 2 commits 1 and 2 (hospital client and read tools, section 6; `lock_held` and `history_transform` on the loop, see the notes under section 2). Sections 2 and 3 are implemented; section 1 is the Phase 2 design, built in six commits (2.10). Updated in the same commit as the code it describes.
 Blocks marked (P2) are built tonight, (P3) in Phase 3.
 
 ## 1. One `/chat` turn (Phase 2 design)
@@ -74,6 +74,8 @@ flowchart TD
 ```
 
 Notes on section 2: a `max_tokens` retry counts as a step against the step limit; the paused payload is written to the session state only when the turn ends paused, together with the history that holds the read-back, never when the hook pauses; a failed turn drops the history but keeps what the executor saved.
+
+Two options on `run_turn` (Phase 2 commit 2): `lock_held=True` skips taking the session lock when the caller already holds it. `history_transform` is applied to the messages only at commit time (done or paused), after which the store's pairing check runs; the model sees the untransformed messages during the turn. A transform that raises fails the turn as `history_invalid` and stores nothing.
 
 ## 3. The tool executor (one atomic unit for a write)
 

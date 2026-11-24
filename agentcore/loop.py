@@ -12,6 +12,7 @@ What a turn does (docs/flow.md, section 2):
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import random
 import time
@@ -42,6 +43,8 @@ from agentcore.tools import ToolContext, ToolRegistry, tool_result_block
 from agentcore.trace import TokenUsage, Tracer, TraceStore, cost_usd
 
 OUTCOMES_KEPT = 20  # told outcomes kept in the session state
+
+HistoryTransform = Callable[[list[dict[str, Any]]], list[dict[str, Any]]]
 
 
 # ---------------------------------------------------------------- what the caller gives and gets
@@ -87,6 +90,7 @@ class _Run:
     data: Mapping[str, Any]
     state: dict[str, Any]
     messages: list[dict[str, Any]]
+    transform: HistoryTransform | None
     tracer: Tracer
     ctx: HookContext
     remaining: Callable[[], float]
@@ -144,12 +148,24 @@ class AgentLoop:
         self._sleep, self._rng, self._clock = sleep, rng, clock
 
     async def run_turn(
-        self, agent: AgentSpec, session_id: str, user_message: str, data: Mapping[str, Any] | None = None
+        self,
+        agent: AgentSpec,
+        session_id: str,
+        user_message: str,
+        data: Mapping[str, Any] | None = None,
+        *,
+        lock_held: bool = False,
+        history_transform: HistoryTransform | None = None,
     ) -> LoopResult:
+        """`lock_held`: the caller already holds the session lock (it is not re-entrant), so do not take it.
+
+        `history_transform`: applied to the turn's messages just before they are committed, and only then.
+        The model sees the full messages during the turn; the store gets the transformed list.
+        """
         tracer = Tracer(self._traces, session_id, field_limit=self.config.trace_field_chars)
         result: LoopResult | None = None
         try:
-            async with self._store.lock(session_id):
+            async with contextlib.nullcontext() if lock_held else self._store.lock(session_id):
                 session = await self._store.load(session_id)
                 deadline = self._clock() + self.config.turn_budget_s
                 data = data or {}
@@ -159,6 +175,7 @@ class AgentLoop:
                     data=data,
                     state=session.state,
                     messages=session.messages,
+                    transform=history_transform,
                     tracer=tracer,
                     ctx=HookContext.for_turn(session_id, tracer.trace_id, data, session.state),
                     remaining=lambda: deadline - self._clock(),
@@ -396,8 +413,14 @@ class AgentLoop:
         )
 
     async def _commit(self, run: _Run) -> None:
+        messages = run.messages
+        if run.transform:
+            try:
+                messages = run.transform(messages)
+            except Exception as e:  # a broken transform must fail the turn, not store something half-changed
+                raise _Fail("history_invalid", f"The conversation could not be prepared for storage ({type(e).__name__}).") from e
         try:
-            await self._store.commit_history(run.session_id, run.messages)
+            await self._store.commit_history(run.session_id, messages)
         except SessionError as e:
             raise _Fail("history_invalid", f"The conversation could not be stored: {e}") from e
 

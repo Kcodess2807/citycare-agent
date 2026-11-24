@@ -536,3 +536,83 @@ def test_two_turns_of_one_session_never_interleave():
     rig = go(scenario())
     assert len(rig.calls[1]["messages"]) == 3  # the second turn saw the first turn's reply
     assert rig.stored().messages[-1]["content"][0]["text"] == "second"
+
+
+# ---------------------------------------------------------------- caller holds the lock, history transform
+
+
+def test_lock_held_runs_inside_a_lock_the_caller_already_holds():
+    async def scenario():
+        rig = Rig([text("blocked"), text("ok")])
+        async with rig.store.lock("s"):
+            # Without the keyword the turn waits for the lock we hold: it never finishes.
+            with pytest.raises(asyncio.TimeoutError):
+                await asyncio.wait_for(rig.loop.run_turn(rig.agent, "s", "x"), 0.05)
+            return await asyncio.wait_for(rig.loop.run_turn(rig.agent, "s", "x", lock_held=True), 1)
+
+    assert go(scenario()).status == "done"
+
+
+def test_lock_held_does_not_release_the_callers_lock():
+    async def scenario():
+        rig = Rig([text("ok")])
+        async with rig.store.lock("s"):
+            await asyncio.wait_for(rig.loop.run_turn(rig.agent, "s", "x", lock_held=True), 1)
+            return rig.store.lock("s").locked()
+
+    assert go(scenario()) is True
+
+
+def text_only(messages):
+    """What a service would pass: keep text, drop tool traffic and a marked note."""
+    out = []
+    for m in messages:
+        blocks = [{"type": "text", "text": m["content"]}] if isinstance(m["content"], str) else m["content"]
+        for b in blocks:  # a service-added note is a first line starting with [NOTE]
+            if b["type"] == "text":
+                b["text"] = "\n".join(l for l in b["text"].split("\n") if not l.startswith("[NOTE]")).strip()
+        keep = [b for b in blocks if b["type"] == "text" and b["text"]]
+        if keep:
+            out.append({"role": m["role"], "content": keep})
+    return out
+
+
+def test_the_model_sees_everything_but_the_store_gets_the_transformed_history():
+    rig = Rig([tool_use("look", {}), text("done")], tools=[make_tool("look")])
+    r = go(rig.loop.run_turn(rig.agent, "s", "[NOTE] facts here\nbook me", history_transform=text_only))
+    assert r.status == "done"
+    assert "tool_use" in str(rig.calls[1]["messages"]) and "[NOTE] facts here" in str(rig.calls[0]["messages"])
+    stored = rig.stored().messages
+    assert [m["role"] for m in stored] == ["user", "assistant"] and stored[0]["content"][0]["text"] == "book me"
+    assert "tool_use" not in str(stored) and "tool_result" not in str(stored) and "[NOTE]" not in str(stored)
+
+
+def test_a_broken_transform_fails_the_turn_and_stores_nothing():
+    def boom(messages):
+        raise RuntimeError("secret detail")
+
+    rig = Rig([text("first"), text("second")])
+    assert rig.turn("one").status == "done"
+    before = rig.stored().messages
+    r = go(rig.loop.run_turn(rig.agent, "s", "two", history_transform=boom))
+    assert (r.status, r.reason_code) == ("failed", "history_invalid")
+    assert "secret detail" not in r.reason and rig.stored().messages == before
+
+
+def test_a_transform_that_breaks_the_history_rules_is_rejected_by_the_store():
+    rig = Rig([text("hi")])
+    r = go(rig.loop.run_turn(rig.agent, "s", "x", history_transform=lambda m: m[1:]))  # starts with an assistant message
+    assert (r.status, r.reason_code) == ("failed", "history_invalid") and rig.stored().messages == []
+
+
+def test_a_paused_turn_also_stores_the_transformed_history():
+    class Hold:
+        async def __call__(self, ctx, event):
+            return Pause("awaiting yes", {"k": 1})
+
+    hooks = HookRunner()
+    hooks.add("before_tool", Hold())
+    rig = Rig([tool_use("look", {}), text("confirm?")], tools=[make_tool("look")], hooks=hooks)
+    r = go(rig.loop.run_turn(rig.agent, "s", "[NOTE] n\nyes", history_transform=text_only))
+    assert r.status == "paused" and rig.stored().state["pending"] == {"k": 1}
+    assert "tool_use" not in str(rig.stored().messages) and "[NOTE]" not in str(rig.stored().messages)
