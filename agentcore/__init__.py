@@ -6,16 +6,21 @@ It knows nothing about what the agents are for. Anything domain specific lives o
 from agentcore.config import RetryPolicy, RuntimeConfig
 from agentcore.errors import ToolError, ToolFailed, ToolOutcomeUnknown, ToolRetryable
 from agentcore.results import Done, Failed, ToolResult, Unknown
+from agentcore.tools import Tool, ToolContext, ToolRegistry, ToolSpecError
 
 __all__ = [
     "Done",
     "Failed",
     "RetryPolicy",
     "RuntimeConfig",
+    "Tool",
+    "ToolContext",
     "ToolError",
     "ToolFailed",
     "ToolOutcomeUnknown",
     "ToolResult",
+    "ToolRegistry",
     "ToolRetryable",
+    "ToolSpecError",
     "Unknown",
 ]

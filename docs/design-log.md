@@ -2,8 +2,8 @@
 
 ## Status
 
-- **Current phase:** 1 (agentcore). Commits 1 and 2 of 8 pushed, 3 written but not committed. Deadline for agentcore: 7 pm
-- **Code written:** `agentcore/` config, error and result types, boundary test (commit 1); trace events, cost and trace store (commit 2); session store (commit 3)
+- **Current phase:** 1 (agentcore). Commits 1 to 3 of 8 pushed, 4 written but not committed. Deadline for agentcore: 7 pm
+- **Code written:** `agentcore/` config, error and result types, boundary test (commit 1); trace events, cost and trace store (commit 2); session store (commit 3); tool registry (commit 4)
 - **Decided:**
   - Phase 0 (0.1 to 0.5): payment links retry on 503 only and are cached per session; the eval runner uses one session per scenario per run; a timeout on a write is treated like saved-then-503; the booking key is fresh per confirmation and lives in the pending action
   - Phase 1 (1.1 to 1.10): async-only loop, `max_tokens` never sends partial text, effort instead of thinking switches, one atomic executor owns try, retry same key, verify, one result, state saved around writes while history rolls back, policies live in `agent_service` hooks, build order in 1.10
@@ -263,4 +263,12 @@ Each commit: tests pass with no API key, `design-log.md` and `flow.md` updated i
 - Locks: one `asyncio.Lock` per session id, kept until `delete` or a purge of an expired session. A lock held by a running turn is never dropped.
 - Bug caught by the tests: `purge_expired` deleted from the dict it was iterating over.
 - **For DESIGN.md (what is missing before real patients):** the per-session lock is in-process (`asyncio.Lock`). With a Redis session store and several service instances, two instances could handle two messages of one session at once. A shared lock (for example a Redis lock with an expiry) or sticky routing by session id is needed first. The same applies to the in-memory trace store, which is per process.
+
+**Commit 4: tool registry.**
+- A `Tool` is a frozen spec: name, description, pydantic input model, `run` (one attempt), optional `verify`, `retry`, `idempotent`, `atomic`, `reserve_s`, `timeout_s`, opaque `tags`. `ToolContext` carries the session id and an opaque `data` mapping that the service fills per turn (this is where the service will pass the verified phone number to tools, so the model never supplies it).
+- **Bad definitions fail at start-up** with `ToolSpecError`: a name the API would reject, an empty description, a duplicate name, or an input model that doesn't set `extra="forbid"`. The last one matters: without it, pydantic silently drops a field the model invents (for example a phone number it typed), and the call would run without anyone noticing.
+- **`schemas()`** builds the API `tools` list from the pydantic models, in registration order (not sorted) so the list is byte-identical on every call and the prompt cache keeps hitting.
+- **`parse(name, raw_input)`** never raises. An unknown tool, input that isn't a JSON object, or a validation error all come back as a `Failed` the model can read: `Invalid input for 'x': field: message; ...`, or `Unknown tool 'x'. Available tools: a, b.` The error text names the field and the rule but leaves out the offending value, which could be long or private. The wording is generic by design (the boundary test enforces it).
+- **`tool_result_block`** turns a `Done`/`Failed`/`Unknown` into an API block. Only `Done` is a success. A value that JSON can't encode is stringified, not a crash.
+- **Not done, on purpose:** the API's `strict: true` option on tools. It needs `additionalProperties: false` (we have it) but also restricts which pydantic features are allowed. Revisit if the model sends malformed arguments in practice. Large tool outputs are not truncated yet: add a limit if a hospital response turns out to be big.
 
