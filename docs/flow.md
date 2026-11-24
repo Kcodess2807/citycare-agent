@@ -1,6 +1,6 @@
 # How a message moves through the system
 
-Status: Phase 2 design agreed (docs/design-log.md, 2.1 to 2.10). Built so far: agentcore (Phase 1, complete) and Phase 2 commits 1 to 5 (hospital client and read tools, section 6; `lock_held` and `history_transform` on the loop, see the notes under section 2; the router, section 7; the agents and the facts note, section 8; `/chat` and the trace endpoint, section 9, which is what section 1 describes). Sections 2 and 3 are implemented; section 1 is the Phase 2 design, built in six commits (2.10). Updated in the same commit as the code it describes.
+Status: Phase 2 design agreed (docs/design-log.md, 2.1 to 2.10). Built so far: agentcore (Phase 1, complete) and Phase 2 commits 1 to 6 (hospital client and read tools, section 6; `lock_held` and `history_transform` on the loop, see the notes under section 2; the router, section 7; the agents and the facts note, section 8; `/chat` and the trace endpoint, section 9, which is what section 1 describes). Sections 2 and 3 are implemented; section 1 is the Phase 2 design, built in six commits (2.10). Updated in the same commit as the code it describes.
 Blocks marked (P2) are built tonight, (P3) in Phase 3.
 
 ## 1. One `/chat` turn (Phase 2 design)
