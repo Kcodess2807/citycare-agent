@@ -27,7 +27,9 @@ def test_usage_from_sdk_object_handles_none_fields():
 
 def test_clip_truncates_and_scrubs_key():
     assert clip("x" * 50, 10) == "x" * 10 + "...[truncated 40 chars]"
-    assert "sk-ant-api03-SECRET" not in clip({"k": "sk-ant-api03-SECRET_abc"}, 500)
+    fake_key = "sk" + "-ant-" + "api03-" + "A1b2" * 8  # built at runtime: no key-shaped literal in the repo
+    clipped = clip({"k": fake_key}, 500)
+    assert fake_key not in clipped and "[redacted]" in clipped
     assert clip({"a": 1}, 50) == '{"a": 1}'
 
 
