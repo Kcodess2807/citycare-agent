@@ -14,15 +14,17 @@ from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import Any
 
-from agent_service import emergency
+from agent_service import confirm, emergency
 from agent_service.agents import build_agents
 from agent_service.facts import facts_note, merge_facts, text_only, with_note
+from agent_service.gate import Checked, Gate
 from agent_service.hospital import HospitalClient
 from agent_service.prompts import done_but_no_reply, failure_reply, human_reply
 from agent_service.router import Route, route as pick_route
 from agent_service.schemas import ChatRequest, ChatResponse
 from agent_service.tools import read_tools
-from agentcore import RuntimeConfig
+from agent_service.write_tools import write_tools
+from agentcore import Done, Failed, HookRunner, RuntimeConfig, ToolContext, Unknown
 from agentcore.loop import AgentLoop, AgentSpec, LoopResult
 from agentcore.session import InMemorySessionStore, SessionStore
 from agentcore.trace import InMemoryTraceStore, Tracer, TraceStore
@@ -54,7 +56,11 @@ class ChatService:
         self.config = config or RuntimeConfig()
         self.client, self.store, self.traces, self.hospital = client, store, traces, hospital
         self.agents = agents if agents is not None else build_agents(read_tools(hospital))
-        self.loop = AgentLoop(client, store, traces, config=self.config, sleep=sleep, rng=rng)
+        self.writes = write_tools(hospital)  # not given to any agent unless the caller builds agents with them
+        self.gate = Gate(hospital, sleep, rng)
+        hooks = HookRunner(self.config.hook_timeout_s)
+        hooks.add("before_tool", self.gate.before_tool, "confirm_gate")
+        self.loop = AgentLoop(client, store, traces, hooks=hooks, config=self.config, sleep=sleep, rng=rng)
         self._sleep, self._rng = sleep, rng
 
     async def handle(self, req: ChatRequest) -> ChatResponse:
@@ -81,6 +87,13 @@ class ChatService:
                 await self._stop(tracer, "emergency", reply)
                 return self._response(reply, "safety", tracer, handoff=True, emergency=True)
 
+            # Whatever the patient says next, a pending action is spent: it is confirmed now or never.
+            pending = state.pop("pending", None)
+            if pending is not None:
+                await self.store.save_state(key, state)
+                if isinstance(pending, dict) and confirm.is_yes(req.message, pending.get("tool")):
+                    return await self._confirmed(key, session.messages, state, pending, req, tracer)
+
             route = await pick_route(
                 self.client, tracer, req.message,
                 history=session.messages, last_agent=state.get("last_agent"), last_language=state.get("language"),
@@ -95,12 +108,17 @@ class ChatService:
                 return self._response(reply, "human", tracer, handoff=True)
 
             agent = self.agents[route.agent]
-            data = {"phone": req.phone, "facts": {}}  # the phone is the request's, never the message's
+            # The phone is the request's, never the message's. `links` and `facts` are per-session records that
+            # tools write into during the turn and `_save` stores after it, failed turns included.
+            data = {
+                "phone": req.phone, "facts": {}, "links": dict(state.get("links") or {}),
+                "language": route.language, "agent": route.agent, "gate": {},
+            }
             now = await self._hospital_time() if route.agent == "booking" else None
             note = facts_note(state.get("facts"), now)
             result = await self.loop.run_turn(
                 agent, key, with_note(req.message, note), data,
-                lock_held=True, history_transform=text_only, tracer=tracer,
+                lock_held=True, history_transform=self._history(data), tracer=tracer,
             )
             return await self._answer(key, route, agent, result, data, tracer)
 
@@ -108,12 +126,68 @@ class ChatService:
         ok = result.status != "failed"
         told = False
         if ok:
-            reply, handoff = result.text, result.escalate
+            # A paused turn is a write waiting for a yes: the patient reads the code's read-back, not the model's words.
+            reply = result.pending["readback"] if result.status == "paused" else result.text
+            handoff = result.escalate
         else:
             reply, handoff = self._failure(result, route.language)
             told = bool(result.outcomes)  # the patient now hears about what was saved
-        await self._save(key, route, ran=agent.name if ok else None, facts=data["facts"], mark_told=told)
+        await self._save(key, route, ran=agent.name if ok else None, facts=data["facts"], links=data["links"], mark_told=told)
         return self._response(reply, agent.name, tracer, handoff=handoff)
+
+    @staticmethod
+    def _history(data: dict[str, Any]):
+        """Text-only history, with the code's read-back in place of the model's words when a write paused."""
+
+        def transform(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+            out = text_only(messages)
+            shown = data["gate"].get("readback")
+            if shown and out and out[-1]["role"] == "assistant":
+                out[-1] = {"role": "assistant", "content": shown}
+            return out
+
+        return transform
+
+    async def _confirmed(
+        self, key: str, messages: list[dict[str, Any]], state: dict[str, Any], pending: dict[str, Any],
+        req: ChatRequest, tracer: Tracer,
+    ) -> ChatResponse:
+        """A strict yes: code runs the stored action itself and the reply comes from the real result (design-log 3.2)."""
+        language = pending.get("language") or state.get("language") or "en"
+        agent = pending.get("agent") or "booking"
+        data = {
+            "phone": req.phone, "facts": {}, "links": dict(state.get("links") or {}),
+            "language": language, "agent": agent, "gate": {}, "idempotency_key": pending.get("key"),
+        }
+        handoff = False
+        tool = self.writes.get(str(pending.get("tool")))
+        try:
+            inp = tool.input_model.model_validate(pending.get("params")) if tool else None
+        except Exception:
+            inp = None
+        if tool is None or inp is None:  # a stored action we cannot read: nothing runs, a person looks
+            reply, handoff = confirm.unknown_reply(language), True
+        else:
+            # Fetched again: the patient said yes to what the records said then. If they say something else now, stop.
+            checked = await self.gate.check(tool.name, inp, data)
+            if not isinstance(checked, Checked) or checked.display != pending.get("display"):
+                reply = confirm.changed_reply(language)
+            else:
+                result = await self.loop.executor.execute(tool, inp, ToolContext(key, data), state=state, tracer=tracer)
+                if isinstance(result, Done):
+                    reply = confirm.done_reply(tool.name, pending["display"], result.value, language)
+                elif isinstance(result, Unknown):
+                    reply, handoff = confirm.unknown_reply(language), True
+                else:
+                    reply = confirm.failed_reply(tool.name, result.reason, language)
+                    handoff = isinstance(result, Failed) and result.escalate
+        state["links"] = data["links"]
+        for outcome in state.get("outcomes", []):
+            outcome["told"] = True  # the patient is told by this reply, so the model need not repeat it next turn
+        await self.store.save_state(key, state)
+        await self._remember(key, messages, req.message, reply)
+        await self._stop(tracer, "confirmed", reply)
+        return self._response(reply, agent, tracer, handoff=handoff)
 
     def _failure(self, result: LoopResult, language: str) -> tuple[str, bool]:
         statuses = {o.get("status") for o in result.outcomes}
@@ -143,13 +217,16 @@ class ChatService:
             pass
 
     async def _save(
-        self, key: str, route: Route, *, ran: str | None, facts: dict | None = None, mark_told: bool = False
+        self, key: str, route: Route, *, ran: str | None, facts: dict | None = None, links: dict | None = None,
+        mark_told: bool = False,
     ) -> None:
         """Save what the turn learned. Runs after a failed turn too, so ids and outcomes are not lost."""
         try:
             state = (await self.store.load(key)).state  # fresh: the loop saved its own changes
             if facts:
                 state["facts"] = merge_facts(state.get("facts"), facts)
+            if links is not None:
+                state["links"] = links
             if ran:
                 state["last_agent"] = ran
             if not route.fallback:

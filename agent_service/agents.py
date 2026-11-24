@@ -20,6 +20,14 @@ TOOLS = {
     "billing": ["list_bills"],
 }
 
+# Only given to an agent when the caller passes a write registry. The default wiring does not (commit 4
+# adds them together with the 4-hour rule and the prompts). Even then a write tool never runs on the
+# model's call: the gate in `gate.py` turns it into a pending action (design-log 3.2).
+WRITE_TOOLS = {
+    "booking": ["book_appointment", "reschedule_appointment", "cancel_appointment"],
+    "billing": ["create_payment_link"],
+}
+
 
 def _subset(reg: ToolRegistry, names: list[str]) -> ToolRegistry:
     sub = ToolRegistry()
@@ -31,14 +39,19 @@ def _subset(reg: ToolRegistry, names: list[str]) -> ToolRegistry:
     return sub
 
 
-def build_agents(read_tools: ToolRegistry) -> dict[str, AgentSpec]:
+def build_agents(read_tools: ToolRegistry, write_tools: ToolRegistry | None = None) -> dict[str, AgentSpec]:
+    pool = ToolRegistry()
+    for source in (read_tools, write_tools):
+        for name in source.names() if source else []:
+            pool.register(source.get(name))
+    names = {k: TOOLS[k] + (WRITE_TOOLS.get(k, []) if write_tools else []) for k in TOOLS}
     systems = {"info": prompts.INFO, "booking": prompts.BOOKING, "billing": prompts.BILLING}
     return {
         name: AgentSpec(
             name=name,
             model=SPECIALIST_MODEL,
             system=systems[name],
-            tools=_subset(read_tools, TOOLS[name]),
+            tools=_subset(pool, names[name]),
             max_tokens=SPECIALIST_MAX_TOKENS,
             effort=SPECIALIST_EFFORT,
         )

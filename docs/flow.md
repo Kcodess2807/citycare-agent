@@ -207,3 +207,27 @@ flowchart TD
 ```
 
 `GET /trace/{session_id}`: every event of the session (router and specialist share one trace id per turn) and the totals over all turns. Traces are filed under the request's session id, state under the hashed key, so one session id used by two phones is two conversations with one shared trace list.
+
+## Phase 3: a write (commit 3)
+
+```mermaid
+flowchart TD
+    M[Message] --> E{emergency?}
+    E -- yes --> EX[Fixed reply, clear pending, emergency + handoff]
+    E -- no --> P{pending action?}
+    P -- yes --> SP[Spend it: pop and save]
+    SP --> Y{strict yes?}
+    Y -- yes --> C[Check again against the hospital's records]
+    C -- changed --> CH[Reply: something changed, nothing ran]
+    C -- same --> X[Executor runs the STORED action with the STORED key]
+    X --> R{result}
+    R -- Done --> D[Reply from the real result: booked / cancelled / link]
+    R -- Failed --> F[Reply: not done, nothing changed / slot taken]
+    R -- Unknown --> U[Reply: could not confirm, don't retry. handoff]
+    Y -- no --> RT[Router, agent as usual]
+    P -- no --> RT
+    RT --> W{model calls a write tool}
+    W --> G[Gate hook: fetch records, own id? refuse, same words for foreign and missing]
+    G -- ok --> PA[Pause: store pending, reply = code read-back]
+    G -- refused --> B[Block: the model is told, nothing stored]
+```
