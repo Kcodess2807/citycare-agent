@@ -206,6 +206,10 @@ class ChatService:
                 else:
                     reply = confirm.failed_reply(tool.name, result.reason, language)
                     handoff = isinstance(result, Failed) and result.escalate
+                    if tool.name == "book_appointment" and "slot_taken" in result.reason:
+                        offer = await self._offer_next_slot(tool.name, inp, data)
+                        if offer:  # the next free slot, as a full read-back that waits for its own yes
+                            state["pending"], reply = offer, confirm.taken_offer_reply(offer["readback"], language)
         state["links"] = data["links"]
         state["strikes"] = 0
         for outcome in state.get("outcomes", []):
@@ -214,6 +218,15 @@ class ChatService:
         await self._remember(key, messages, req.message, reply)
         await self._stop(tracer, "confirmed", reply)
         return self._response(reply, agent, tracer, handoff=handoff)
+
+    async def _offer_next_slot(self, tool_name: str, inp: Any, data: dict[str, Any]) -> dict[str, Any] | None:
+        """After a 409 on a booking: the next free slot with the same doctor, checked and stored as the new pending action."""
+        nxt = await self.gate.next_free_slot(inp.doctor_id, inp.start)
+        if nxt is None:
+            return None
+        offered = inp.model_copy(update={"start": nxt})
+        checked = await self.gate.check(tool_name, offered, data)
+        return self.gate.pending_for(tool_name, offered, checked, data) if isinstance(checked, Checked) else None
 
     def _failure(self, result: LoopResult, language: str) -> tuple[str, bool]:
         statuses = {o.get("status") for o in result.outcomes}

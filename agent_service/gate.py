@@ -38,6 +38,7 @@ CANT_CHECK = f"Could not check the record just now. {NOTHING} Try again shortly.
 GATE_HOOK = "confirm_gate"  # the name it is registered under, so build_agents can tell it is installed
 SOON, CLOCK = "soon", "clock"
 FOUR_HOURS = dt.timedelta(hours=4)
+NEXT_SLOT_DAYS = 7  # how far ahead to look for the next free slot after a 409
 TOO_SOON = f"That appointment starts within 4 hours or has already started, so only staff can change it. The system tells the patient and passes the chat to staff. {NOTHING}"
 NO_CLOCK = f"Could not check the hospital's clock, so nothing can be changed safely. The system passes the chat to staff. {NOTHING}"
 
@@ -122,6 +123,32 @@ class Gate:
             return {"doctor": doctor, "when": appt["start"]}
         return {"doctor": doctor, "old": appt["start"], "new": inp.new_start.isoformat()}
 
+    @staticmethod
+    def pending_for(tool: str, inp: BaseModel, checked: Checked, data: Any) -> dict[str, Any]:
+        """The stored action for a checked write. A fresh idempotency key per confirmation (design-log 0.5)."""
+        return {
+            "tool": tool,
+            "params": inp.model_dump(mode="json"),
+            "key": uuid.uuid4().hex,
+            "agent": data.get("agent", ""),
+            "language": data.get("language", "en"),
+            "display": checked.display,
+            "readback": checked.readback,
+        }
+
+    async def next_free_slot(self, doctor_id: str, after: dt.datetime, days: int = NEXT_SLOT_DAYS) -> dt.datetime | None:
+        """The first free slot of this doctor after `after`, looking at that day and the next `days - 1`. None if none, or if the hospital cannot say."""
+        try:
+            for n in range(days):
+                day = (after + dt.timedelta(days=n)).date().isoformat()
+                free = (await self._get(f"/doctors/{doctor_id}/slots", date=day))["free"]
+                later = [s for s in (dt.datetime.fromisoformat(x) for x in free) if s > after]
+                if later:
+                    return min(later)
+        except (ToolError, ValueError, KeyError, TypeError):
+            pass
+        return None
+
     async def before_tool(self, ctx: HookContext, event: ToolCallEvent):
         """For a write tool: refuse, or store a pending action and pause. It never lets the call run."""
         if "write" not in event.tool.tags:
@@ -131,14 +158,6 @@ class Gate:
             if checked.handoff:
                 ctx.data["handoff"].setdefault("kind", checked.handoff)  # the service answers and hands off
             return Block(checked.reason)
-        pending = {
-            "tool": event.tool.name,
-            "params": event.input.model_dump(mode="json"),
-            "key": uuid.uuid4().hex,  # a fresh idempotency key per confirmation (design-log 0.5)
-            "agent": ctx.data.get("agent", ""),
-            "language": ctx.data.get("language", "en"),
-            "display": checked.display,
-            "readback": checked.readback,
-        }
+        pending = self.pending_for(event.tool.name, event.input, checked, ctx.data)
         ctx.data["gate"]["readback"] = checked.readback  # the service swaps it in for the model's own words
         return Pause("Waiting for the patient's yes. The system sends them the details itself, so write one short line.", payload=pending)

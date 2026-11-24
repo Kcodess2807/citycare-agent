@@ -115,6 +115,13 @@ _TAKEN = {
            "reschedule_appointment": "वह समय अभी किसी और ने ले लिया, इसलिए अपॉइंटमेंट नहीं बदला। कोई और समय बताइए, मैं देखता हूँ।"},
 }
 
+# After a 409 on a booking: what did not happen, then the next free slot as a full read-back (confirm.readback).
+_TAKEN_OFFER = {
+    "en": "That time was just taken by someone else, so it was not booked. Next free time with this doctor:",
+    "hinglish": "Woh time abhi kisi aur ne le liya, isliye book nahi hua. Is doctor ke saath agla free time:",
+    "hi": "वह समय अभी किसी और ने ले लिया, इसलिए बुक नहीं हुआ। इस डॉक्टर के साथ अगला खाली समय:",
+}
+
 _NOT_DONE = {
     "en": "Sorry, that was not done and nothing was changed. You can ask me to try again, or ask for our staff.",
     "hinglish": "Sorry, woh nahi ho paaya aur kuch bhi change nahi hua. Dobara try karne bolein, ya staff bol dein.",
@@ -166,6 +173,10 @@ def failed_reply(tool: str, reason: str, language: str | None) -> str:
     if "slot_taken" in reason and tool in _TAKEN[lang]:
         return _TAKEN[lang][tool]
     return _NOT_DONE[lang]
+
+
+def taken_offer_reply(readback_text: str, language: str | None) -> str:
+    return f"{_TAKEN_OFFER[_lang(language)]} {readback_text}"
 
 
 def unknown_reply(language: str | None) -> str:

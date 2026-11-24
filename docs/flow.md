@@ -271,3 +271,15 @@ flowchart LR
     B -- no gate --> ERR[ValueError at start-up]
     OK --> T[Model calls a write tool] --> G[Gate: pause, nothing runs] --> Y[Next message: strict yes, code runs the stored action]
 ```
+
+## Phase 3: a lost race on a booking (fix 2)
+
+```mermaid
+flowchart TD
+    Y[Strict yes on a pending booking] --> X[Executor runs the stored booking]
+    X -- 409 slot taken --> N[Gate.next_free_slot: same doctor, after the taken slot, up to 7 days]
+    N -- found --> C[Gate check, new pending action with a new key]
+    C --> R[Reply: it was not booked + the next slot as a full read-back]
+    R --> Y2[Next message: strict yes runs it, anything else spends it]
+    N -- none or hospital cannot say --> P[Plain: not booked, no pending]
+```
