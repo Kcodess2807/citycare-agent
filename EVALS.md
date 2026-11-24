@@ -109,6 +109,8 @@ Total for the 13 eval runs: about $0.265, of which the sonnet comparison is $0.1
 
 ## Known weaknesses
 
+The full list of known weaknesses, including the ones below, is in DESIGN.md section 5.
+
 - **Reschedule has no next-slot offer after a lost race** (the only failure above).
 - **The router is one cheap model call and can route an ambiguous question either way.** It sent an insurance question to billing in one earlier chaos run; after a general boundary line was added, it routed that question to info in all three of these runs. Three runs do not prove it.
 - **The second router layer for emergencies is unproven on the real API.** The emergency flag fired 0 times in every run; the word lists caught both emergency messages first (0 model calls). Its schema was accepted by the API, but it has never fired for real.
