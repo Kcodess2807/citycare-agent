@@ -2,8 +2,8 @@
 
 ## Status
 
-- **Current phase:** 1 (agentcore). Commits 1 to 3 of 8 pushed, 4 written but not committed. Deadline for agentcore: 7 pm
-- **Code written:** `agentcore/` config, error and result types, boundary test (commit 1); trace events, cost and trace store (commit 2); session store (commit 3); tool registry (commit 4)
+- **Current phase:** 1 (agentcore). Commits 1 to 4 of 8 pushed, 5 written but not committed. Deadline for agentcore: 7 pm
+- **Code written:** `agentcore/` config, error and result types, boundary test (commit 1); trace events, cost and trace store (commit 2); session store (commit 3); tool registry (commit 4); hooks (commit 5)
 - **Decided:**
   - Phase 0 (0.1 to 0.5): payment links retry on 503 only and are cached per session; the eval runner uses one session per scenario per run; a timeout on a write is treated like saved-then-503; the booking key is fresh per confirmation and lives in the pending action
   - Phase 1 (1.1 to 1.10): async-only loop, `max_tokens` never sends partial text, effort instead of thinking switches, one atomic executor owns try, retry same key, verify, one result, state saved around writes while history rolls back, policies live in `agent_service` hooks, build order in 1.10
@@ -271,4 +271,16 @@ Each commit: tests pass with no API key, `design-log.md` and `flow.md` updated i
 - **`parse(name, raw_input)`** never raises. An unknown tool, input that isn't a JSON object, or a validation error all come back as a `Failed` the model can read: `Invalid input for 'x': field: message; ...`, or `Unknown tool 'x'. Available tools: a, b.` The error text names the field and the rule but leaves out the offending value, which could be long or private. The wording is generic by design (the boundary test enforces it).
 - **`tool_result_block`** turns a `Done`/`Failed`/`Unknown` into an API block. Only `Done` is a success. A value that JSON can't encode is stringified, not a crash.
 - **Not done, on purpose:** the API's `strict: true` option on tools. It needs `additionalProperties: false` (we have it) but also restricts which pydantic features are allowed. Revisit if the model sends malformed arguments in practice. Large tool outputs are not truncated yet: add a limit if a hospital response turns out to be big.
+
+**Commit 5: hooks.**
+- Results are three types: `Allow`, `Block(reason)`, `Pause(reason, payload)`. The runner fills in `by` (the hook's name). The reason is passed on exactly as the hook wrote it.
+- Four points: `before_model`, `after_model`, `before_tool`, `after_tool`. A hook is `hook(ctx, event)`, sync or async. `HookContext` has the session id, a turn id, the opaque per-turn `data`, a **live read-only view** of the turn's state, and `scratch`: a dict shared by every hook of one turn and thrown away after it. A policy such as "one change per turn" keeps its counter in `scratch` and reads the tool's `tags`, so it needs nothing from the runtime (tested with a generic version).
+- **Order:** registration order, the first non-Allow decides and later hooks don't run.
+- **Fail closed:** a hook that raises, times out (`hook_timeout_s`, 10s) or returns nothing counts as a Block. The Block reason names the hook and the exception type, never the exception message, so nothing private reaches the model. Returning `None` by mistake blocks instead of allowing: a safety hook someone forgot to finish must not let calls through.
+- **Pause only before a tool.** A Pause from any other point becomes a Block saying it cannot pause. `payload` is not read or checked here. It must be JSON-serialisable and is checked when the loop saves it to the session state.
+- **After a tool:** a Block replaces the result with a `Failed(reason)`. Intended for hiding or refusing an output, not for undoing a write.
+- **Trace:** every decision is a `hook_decision` event with the hook name, point, status (`allow`/`block`/`pause`), reason and duration. Allow is recorded too, so the trace shows which checks ran.
+- **Known limit:** the timeout only works for async hooks. A sync hook that blocks the thread can't be interrupted. Hooks that do I/O (such as reading a clock from the hospital) must be async.
+- Not in this commit: what happens to a Block or Pause. That is the loop's job in commit 7 (a `tool_result` for a blocked call, end of turn on Pause).
+- **Fix made before committing: hooks see live state, not a snapshot.** The first version gave hooks a copy of the state from the start of the turn. In the confirm flow, code marks the pending action confirmed and runs the stored call in the same turn, so a `before_tool` hook would still have seen "awaiting" and blocked the confirmed call. `HookContext.state` is now a `MappingProxyType` over the turn's own state dict (build it with `HookContext.for_turn`). The order in the confirm flow is therefore: change the turn's state, save it with `save_state` (write-ahead, 1.7), then run the call through the hooks. Hooks can't write through the view (top level only; nested values are the turn's objects and hooks must not change them). Tested both ways.
 

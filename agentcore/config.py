@@ -48,6 +48,9 @@ class RuntimeConfig(BaseModel):
     tool_attempt_timeout_s: float = Field(10.0, gt=0, description="Default for one attempt of one tool")
     atomic_reserve_s: float = Field(30.0, gt=0, description="Default budget an atomic tool needs before it may start")
 
+    # Hooks.
+    hook_timeout_s: float = Field(10.0, gt=0, description="A hook that takes longer counts as a Block")
+
     # Stores.
     session_ttl_s: float = Field(1800.0, gt=0)
     history_cap_messages: int = Field(40, ge=2)

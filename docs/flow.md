@@ -1,6 +1,6 @@
 # How a message moves through the system
 
-Status: design for Phase 1. Built so far: commits 1 to 4 of 8 (config, errors, result types, trace events and store, session store, tool registry). The diagrams below are not implemented yet. Updated in the same commit as the code it describes.
+Status: design for Phase 1. Built so far: commits 1 to 5 of 8 (config, errors, result types, trace events and store, session store, tool registry, hooks). The diagrams below are not implemented yet. Updated in the same commit as the code it describes.
 Blocks marked (P2) and (P3) arrive in later phases.
 
 ## 1. One `/chat` turn

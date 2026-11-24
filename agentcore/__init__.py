@@ -5,10 +5,16 @@ It knows nothing about what the agents are for. Anything domain specific lives o
 
 from agentcore.config import RetryPolicy, RuntimeConfig
 from agentcore.errors import ToolError, ToolFailed, ToolOutcomeUnknown, ToolRetryable
+from agentcore.hooks import Allow, Block, HookContext, HookRunner, Pause
 from agentcore.results import Done, Failed, ToolResult, Unknown
 from agentcore.tools import Tool, ToolContext, ToolRegistry, ToolSpecError
 
 __all__ = [
+    "Allow",
+    "Block",
+    "HookContext",
+    "HookRunner",
+    "Pause",
     "Done",
     "Failed",
     "RetryPolicy",
