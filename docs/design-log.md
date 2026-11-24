@@ -2,8 +2,8 @@
 
 ## Status
 
-- **Current phase:** 1 (agentcore). Design agreed, waiting for the user's "go". No code yet
-- **Code written:** none yet
+- **Current phase:** 1 (agentcore). Commit 1 of 8 written, not yet committed. Deadline for agentcore: 7 pm
+- **Code written:** `agentcore/` config, error and result types, plus the boundary test (commit 1)
 - **Decided:**
   - Phase 0 (0.1 to 0.5): payment links retry on 503 only and are cached per session; the eval runner uses one session per scenario per run; a timeout on a write is treated like saved-then-503; the booking key is fresh per confirmation and lives in the pending action
   - Phase 1 (1.1 to 1.10): async-only loop, `max_tokens` never sends partial text, effort instead of thinking switches, one atomic executor owns try, retry same key, verify, one result, state saved around writes while history rolls back, policies live in `agent_service` hooks, build order in 1.10
@@ -227,3 +227,18 @@ Each commit: tests pass with no API key, `design-log.md` and `flow.md` updated i
 ### Notes carried forward to Phase 3
 - The model's read-back may differ from the stored payload (wrong doctor, time or amount). The patient says yes to what they read, and the code runs what is stored. Options: code renders the canonical facts and an `after_model` hook checks the reply contains them, or code sends the read-back itself. Decide in Phase 3.
 - How code recognises a clear yes (a `confirm` tool, or matching the reply to the pending action).
+
+### 1.11 Build log
+
+**Two rules for the whole build (set by the user):**
+- Strings inside agentcore are generic too: no domain words in `tool_result` text or anywhere else in the package. Wording comes from the hook's `reason` or the tool's own message. The boundary test scans all agentcore source for domain words (code, comments, docstrings, strings), not only imports.
+- agentcore must be done by 7 pm. If behind, cut in this order and log each cut here as skipped: (1) inflight recovery at turn start, (2) history trimming, (3) the trace LRU cap.
+
+**Commit 1: config and error types.**
+- `RuntimeConfig` (frozen pydantic) holds every number from 1.4 and 1.6. `RetryPolicy` is its own model so a tool can carry its own. Delay before retry n is random in `[0, min(cap, base * 2**n)]`.
+- The hospital client's 6s timeout is not in this config. It belongs to `agent_service`. agentcore only has a default per-attempt tool timeout (10s).
+- Names changed from the design text: errors are `ToolFailed`, `ToolRetryable`, `ToolOutcomeUnknown` (a bare `Unknown` would clash with the `Unknown` result). Results stay `Done`, `Failed`, `Unknown`.
+- The boundary test's forbidden list includes `handoff` and `staff`, so the loop result will say `escalate`, not `handoff`. The service maps `escalate` to the `/chat` field `handoff`.
+- The list leaves out `cancel` and `cancelled`, so `asyncio.CancelledError` and similar words in commit 6 don't trip it. Matching is whole words only, so `billed` is fine too.
+- Checked: a temporary file with a forbidden word and an `agent_service` import makes the boundary tests fail.
+
