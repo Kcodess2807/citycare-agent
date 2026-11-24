@@ -1,9 +1,10 @@
 # How a message moves through the system
 
-Status: Phase 2 design agreed (docs/design-log.md, 2.1 to 2.10). Built so far: agentcore (Phase 1, complete) and Phase 2 commits 1 to 6 (hospital client and read tools, section 6; `lock_held` and `history_transform` on the loop, see the notes under section 2; the router, section 7; the agents and the facts note, section 8; `/chat` and the trace endpoint, section 9, which is what section 1 describes). Sections 2 and 3 are implemented; section 1 is the Phase 2 design, built in six commits (2.10). Updated in the same commit as the code it describes.
-Blocks marked (P2) are built tonight, (P3) in Phase 3.
+Status: everything in this file is built and was exercised by the three reported chaos runs on commit `21b4690` (EVALS.md). The sections follow the order they were built: agentcore (sections 2 and 3, Phase 1), the service (sections 1 and 6 to 9, Phase 2: hospital client and read tools, router, agents and the facts note, `/chat` and the trace endpoint) and the safety pieces (the "Phase 3" sections at the end: the confirmation gate, the 4-hour rule, handoffs and strikes, the next-slot offer, the second yes layer). Section 1 is the whole turn as built. Updated in the same commit as the code it describes.
 
-## 1. One `/chat` turn (Phase 2 design)
+Headings such as "(built, Phase 2 commit 4)" say when a piece was first built; their contents were brought up to date for Phase 3 (tool lists, the pause path).
+
+## 1. One `/chat` turn
 
 The service takes the session lock once for the whole turn. `run_turn` is told the lock is already held (commit 2), so it does not lock again.
 
@@ -12,20 +13,24 @@ flowchart TD
     A[POST /chat: session_id, phone, message] --> L[Take the session lock, load state]
     L --> E[Emergency check: keyword code, en/hi/hinglish, no model]
     E -- emergency --> X[Fixed reply: call 108, emergency=true, handoff, clear pending]
-    E -- ok --> R[Router: haiku, structured output: agent + language]
-    R -- unusable output --> RF[Fallback: last turn's agent, else info]
+    E -- ok --> P{A write waiting for a yes?}
+    P -- strict yes, or the guarded yes layer says confirm --> CF[Code runs the stored action after checking again. Reply built from the real result]
+    P -- none, or not a yes: the pending action is spent --> R[Router: haiku, structured output: agent + language + emergency flag]
+    R -- emergency_suspected --> X
+    R -- unusable output --> RF[Fallback: last turn's agent, else info. Counts as a strike]
     R -- ok --> S
     RF --> S{Which agent}
     S -- human --> HU[Fixed handoff reply, no model call]
-    S -- info --> AI[Info agent: hospital_info.md in prompt, no tools]
-    S -- booking / billing --> AB[Specialist agent loop: read tools only, phone from ctx]
+    S -- info --> AI[Info agent: hospital_info.md in prompt, one tool: contact_staff]
+    S -- booking / billing --> AB[Specialist agent loop: read tools, contact_staff and write tools behind the gate, phone from ctx]
     AI --> RES
     AB --> RES{Loop result}
     RES -- done --> OK[Commit TEXT-ONLY history, save facts]
-    RES -- paused P3 --> OK
+    RES -- paused: a write waits, reply is the code's read-back --> OK
     RES -- failed --> FL[Drop history, keep state, save facts, build reply from outcomes, mark outcomes told]
     OK --> K[Reply: reply, agent, handoff, emergency, trace_id. Always HTTP 200]
     FL --> K
+    CF --> K
     HU --> K
     X --> K
 ```
@@ -112,7 +117,7 @@ The whole box from `Save state: inflight` to `record outcome` runs shielded: a b
 ## 5. Who owns what
 
 - `agentcore/`: loop, registry, executor, hooks mechanism, trace, stores. No hospital words, no hospital imports.
-- `agent_service/`: hospital client, tools, prompts, hooks (ownership, confirmation, 4-hour rule, emergency, one write per turn), router, agents.
+- `agent_service/`: hospital client, tools (reads, `contact_staff`, the four write tools), prompts, the confirmation gate (one `before_tool` hook: ownership, confirmation, the 4-hour rule), the emergency check (plain code in the service, before the router, not a hook), the second yes layer, router, agents. There is no separate "one write per turn" hook: the first write call pauses the turn, a later call in the same step is skipped, any tool call after the pause is refused, and a second attempt fails the turn to a handoff (`agentcore/loop.py`, tested in `tests/test_confirm.py`).
 
 ## 6. One read tool call (built, Phase 2 commit 1)
 
@@ -153,13 +158,13 @@ flowchart TD
 
 Every attempt is a `model_call` trace event (role router) with tokens and cost. Unusable answers are marked `unusable`.
 
-## 8. What one specialist call receives (built, Phase 2 commit 4)
+## 8. What one specialist call receives (built, Phase 2 commit 4; tool lists as of Phase 3)
 
 ```mermaid
 flowchart LR
     subgraph Cached prefix: identical for every patient and turn
         SP[System prompt: common rules + job. Info also holds hospital_info.md]
-        TL[Tool list: info none, booking 3 reads, billing 1 read]
+        TL[Tool list. info: contact_staff. booking: find_doctors, free_slots, list_appointments, contact_staff + book, reschedule, cancel. billing: list_bills, contact_staff + create_payment_link]
     end
     subgraph Per turn, after the prefix
         H[History: text only, patient words + replies the patient saw]
