@@ -11,6 +11,7 @@ import re
 import time
 import uuid
 from collections import OrderedDict
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any, Literal, Protocol
 
@@ -213,8 +214,8 @@ class Span:
         self.extra: dict[str, Any] = {}
 
     async def __aenter__(self) -> Span:
-        self._ts = time.time()
-        self._t0 = time.perf_counter()
+        self._ts = self._tracer._wall()
+        self._t0 = self._tracer._clock()
         return self
 
     async def __aexit__(self, exc_type, exc, tb) -> bool:
@@ -225,7 +226,7 @@ class Span:
             self.type,
             self.name,
             ts=self._ts,
-            duration_ms=(time.perf_counter() - self._t0) * 1000,
+            duration_ms=(self._tracer._clock() - self._t0) * 1000,
             status=self.status,
             attempt=self.attempt,
             input=self.input,
@@ -238,7 +239,12 @@ class Span:
 
 
 class Tracer:
-    def __init__(self, store: TraceStore, session_id: str, trace_id: str | None = None, field_limit: int = 2000):
+    def __init__(
+        self, store: TraceStore, session_id: str, trace_id: str | None = None, field_limit: int = 2000,
+        clock: Callable[[], float] = time.perf_counter,  # durations; a test injects its own so it never waits for real time
+        wall: Callable[[], float] = time.time,  # event timestamps
+    ):
+        self._clock, self._wall = clock, wall
         self.store = store
         self.session_id = session_id
         self.trace_id = trace_id or uuid.uuid4().hex
@@ -246,7 +252,7 @@ class Tracer:
         self._seq = 0
 
     async def record(self, type: EventType, name: str = "", **fields: Any) -> TraceEvent:
-        fields.setdefault("ts", time.time())
+        fields.setdefault("ts", self._wall())
         for key in ("input", "output"):
             if key in fields:
                 fields[key] = clip(fields[key], self._limit)

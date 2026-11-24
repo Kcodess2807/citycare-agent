@@ -33,19 +33,32 @@ def test_clip_truncates_and_scrubs_key():
     assert clip({"a": 1}, 50) == '{"a": 1}'
 
 
+class Clock:
+    """A clock the test moves by hand, so no test waits for or depends on real time."""
+
+    def __init__(self):
+        self.now = 0.0
+
+    def __call__(self):
+        return self.now
+
+
 def test_span_records_duration_and_numbers_events():
+    clock = Clock()
+
     async def go():
         store = InMemoryTraceStore()
-        tr = Tracer(store, "s1")
+        tr = Tracer(store, "s1", clock=clock, wall=lambda: 1000.0)
         async with tr.span("tool_call", "lookup", input={"q": 1}) as sp:
-            await asyncio.sleep(0.01)
+            clock.now += 0.25  # the work "takes" a quarter of a second
             sp.output = {"ok": True}
         await tr.record("stop", "done")
         return await store.get("s1")
 
     first, second = run(go())
     assert (first.seq, second.seq) == (1, 2) and first.trace_id == second.trace_id
-    assert first.duration_ms >= 5 and first.status == "ok" and first.output == '{"ok": true}'
+    assert first.duration_ms == pytest.approx(250) and first.ts == 1000.0 and second.ts == 1000.0  # exact, not "at least"
+    assert first.status == "ok" and first.output == '{"ok": true}'
 
 
 def test_span_marks_error_and_reraises():
