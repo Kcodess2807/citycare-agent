@@ -1,95 +1,86 @@
-# City Care agent: starter repo
+# City Care front-desk agent
 
-Starter code for the **agentcore** assignment. Read [`context.md`](context.md) first; the full brief is on the assignment page we sent you.
+A WhatsApp assistant for a hospital: it books, reschedules and cancels appointments, sends payment links, and answers general questions, in English, Hindi and Hinglish. It is built on our own agent runtime (`agentcore/`) with no agent framework: Python 3.11+, FastAPI, pydantic and the `anthropic` SDK only.
+
+- **How it works and why:** [DESIGN.md](DESIGN.md) (read this first). The message flow, with diagrams, is `docs/flow.md`; every decision, alternative and failure is in `docs/design-log.md`.
+- **What the evals show:** [EVALS.md](EVALS.md): three chaos runs, every failing case, the hand read of replies, and a ledger of every real eval run.
+- **The assignment and the hospital:** `Assignment.md`, `context.md`, `hospital_info.md`.
 
 ## What's here
 
 | Path | What it is |
 |---|---|
-| `context.md` | The product, the hospital rules, the hospital system, models and cost, evals. Read first |
-| `hospital_info.md` | The only facts the info agent may use |
-| `mock_hospital/` | A fake hospital system (appointments and billing) with a chaos mode. Read it, don't change how it behaves |
-| `agent_service/` | The FastAPI app with `POST /chat`, and `naive_agent.py`, which you'll replace |
-| `evals/` | 10 scenarios and a runner that checks what really happened |
-| `tests/` | Example tests and `fake_claude.py`, a scripted Claude client so tests run without a key |
-| `tools/pack_sessions.py` | Packs your Claude Code transcripts for hand-in (see [Hand-in](#hand-in)) |
-
-You'll add `agentcore/` (the runtime) and your agents.
-
-## Your own copy
-
-Clone or fork this repo into your own GitHub repo, and work there. To clone it into a new repo, create an empty repo on GitHub, then:
-
-```bash
-git clone <this repo's URL> citycare-agent
-cd citycare-agent
-git remote set-url origin <your new repo's URL>
-git push -u origin main
-```
-
-Your copy can be **public**, or **private** with the **Fire-Dolphin** account invited as a collaborator (Settings → Collaborators → Add people). Either way, you send us its link when you reply to our email. Commit and push as you go.
+| `agentcore/` | The reusable runtime: loop, tool registry, hooks, atomic tool executor, session store, traces. Imports no hospital code (a test checks) |
+| `agent_service/` | The FastAPI app (`POST /chat`, `GET /trace/{session_id}`), the router, the three agents (booking, billing, info), the tools, prompts, the confirmation gate and the hospital rules |
+| `mock_hospital/` | The fake hospital system with a chaos mode. Read-only: we do not change it. Agents never call its `/_admin` endpoints; only the evals and tests do |
+| `evals/` | The runner, the 10 given scenarios (unchanged) and ours (`11_` to `14_`); `evals/reported/` holds the three result files reported in EVALS.md |
+| `tests/` | 575 tests, with `fake_claude.py`, a scripted Claude client. They pass with no API key |
+| `tools/` | `run_eval_with_budget.py` (an eval run with a hard cost stop), `check_yes_layer.py` and `check_router_format.py` (small real-API checks), `smoke_real.py`, `pack_sessions.py` |
+| `docs/` | `design-log.md` and `flow.md` |
+| `claude-sessions/` | The Claude Code session exports this was built with |
 
 ## Setup
 
-Python 3.11 or newer. With [uv](https://docs.astral.sh/uv/):
+Python 3.11 or newer. From a fresh clone, with [uv](https://docs.astral.sh/uv/):
 
 ```bash
 uv sync
-cp .env.example .env   # then put your API key in .env
+cp .env.example .env     # then put your API key in .env (PowerShell: Copy-Item .env.example .env)
 ```
 
-Or with pip:
+Or with pip: `python -m venv .venv`, `.venv/bin/pip install -r requirements.txt` (Windows: `.venv\Scripts\pip`), activate it, and drop the `uv run` prefix from the commands below.
 
-```bash
-python -m venv .venv
-.venv/bin/pip install -r requirements.txt     # Windows: .venv\Scripts\pip install -r requirements.txt
-```
-
-(With pip, drop the `uv run` prefix from the commands below and activate the venv instead.)
-
-Use the API key we sent you for both Claude Code and your agents. In your terminal, before starting Claude Code:
+The agent service reads `.env`. The eval runner and the mock hospital read plain environment variables, so for evals set the key in your terminal as well:
 
 ```bash
 export ANTHROPIC_API_KEY=sk-ant-...        # PowerShell: $env:ANTHROPIC_API_KEY="sk-ant-..."
 ```
 
+Never commit `.env` (it is in `.gitignore`).
+
 ## Run it
 
-Terminal 1, the hospital system (calm):
+Terminal 1, the hospital system (calm, or flaky and slow with chaos on):
 
 ```bash
 uv run uvicorn mock_hospital.app:app --port 8001
+CHAOS=1 uv run uvicorn mock_hospital.app:app --port 8001     # chaos mode. PowerShell: $env:CHAOS="1"; uv run uvicorn ...
 ```
 
-The same in chaos mode (slow, flaky, races):
-
-```bash
-CHAOS=1 uv run uvicorn mock_hospital.app:app --port 8001      # PowerShell: $env:CHAOS="1"; uv run uvicorn ...
-```
-
-Terminal 2, the agent:
+Terminal 2, the agent (default hospital URL `http://localhost:8001`, override with `HOSPITAL_URL`):
 
 ```bash
 uv run uvicorn agent_service.app:app --port 8000
 ```
 
-Try it:
+Try it. The `phone` is who the patient is; a number typed in a message is never trusted:
 
 ```bash
-curl -s localhost:8000/chat -H "content-type: application/json" -d '{"session_id":"t1","phone":"9000000001","message":"I need a skin doctor on Friday evening"}'
+curl -s localhost:8000/chat -H "content-type: application/json" -d '{"session_id":"t1","phone":"9876543210","message":"What do I owe?"}'
+curl -s localhost:8000/trace/t1        # every model call, tool call, hook decision, time, tokens and cost of that session
 ```
+
+A reply has five fields: `reply`, `agent`, `handoff`, `emergency`, `trace_id`. `/chat` always returns 200.
 
 ## Evals
 
-With both services running:
+Two ways. Both need the API key and cost about a cent per run of all 14 scenarios.
+
+**The simple way**: one command starts both servers, runs every scenario once, prints pass or fail with the reasons, time per turn and cost, and stops the servers. It has a hard cost stop and it deletes `traces/traces.jsonl` first, so the cost it adds up is that run's only:
+
+```bash
+uv run python tools/run_eval_with_budget.py --limit 0.50 --chaos     # drop --chaos for a calm run; add --only id1,id2 for some scenarios
+```
+
+**By hand**, with both services running (the runner resets the hospital and sets chaos itself):
 
 ```bash
 uv run python -m evals.run_evals                         # every scenario, once
-uv run python -m evals.run_evals --runs 3 --chaos        # what we ask you to report
+uv run python -m evals.run_evals --runs 3 --chaos        # three chaos runs
 uv run python -m evals.run_evals --only emergency_hinglish
 ```
 
-The runner resets the hospital before each scenario and turns chaos on or off itself, so you don't need to restart the hospital between runs.
+Results go to `evals/results/` (gitignored). The three reported runs are in `evals/reported/`. The scenarios are `evals/scenarios/`: files `01_` to `10_` are the given ones, `11_` to `14_` are ours. Scenario 14 uses our own check type, `payment_link_count`, and fails with "unknown check type" on an unmodified runner (see EVALS.md).
 
 ## Tests
 
@@ -97,42 +88,8 @@ The runner resets the hospital before each scenario and turns chaos on or off it
 uv run pytest
 ```
 
-They must pass without an API key.
+575 tests, no API key needed: the model is a scripted fake (`tests/fake_claude.py`) and several tests run against the real mock hospital app in process. Unset `ANTHROPIC_API_KEY` first if you want to be sure.
 
 ## Claude Code sessions
 
-We read your sessions as part of the review, so:
-
-- **Always start Claude Code from this folder** (the repo root). Claude Code files transcripts by folder.
-- To pick up where you left off the next day: `claude --continue`.
-- **Before you `/clear` or close a session, export it** into `claude-sessions/`, numbered in order:
-
-```
-/export claude-sessions/01-planning.txt
-/export claude-sessions/02-agentcore-loop.txt
-```
-
-- Don't edit exports or transcripts, except to remove an API key from an export.
-
-## Hand-in
-
-Before the deadline, run:
-
-```bash
-uv run python tools/pack_sessions.py
-```
-
-It zips the full transcripts Claude Code keeps on your machine into `claude-sessions/transcripts.zip`, including the parts of long sessions that Claude Code compacted. It also stops if it finds an API key anywhere in the repo. Then commit and push.
-
-Your repo must contain:
-
-| Path | What |
-|---|---|
-| `agentcore/` and your agents | The code |
-| `README.md` | Updated so we can run your version |
-| `CLAUDE.md` | Plus any other files you wrote to guide Claude Code |
-| `DESIGN.md` | See the assignment page |
-| `EVALS.md` | The pass rate of each of your 3 chaos runs, and why each failing case fails |
-| `evals/reported/` | The 3 result files (from `evals/results/`) that `EVALS.md` reports |
-| `evals/scenarios/` | The 10 given scenarios, unchanged, plus at least 3 of yours (`11_...yaml` and up) |
-| `claude-sessions/` | One `/export` `.txt` per session, plus `transcripts.zip` |
+This was written with Claude Code only. Each session was exported to `claude-sessions/` in order, and at hand-in `uv run python tools/pack_sessions.py` adds `claude-sessions/transcripts.zip` with the full transcripts (it also refuses to pack if it finds an API key in the repo).

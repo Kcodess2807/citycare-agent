@@ -38,6 +38,28 @@ All three runs were valid (0 failed model calls out of 97, 94 and 96). No run wa
 
 Across the three runs: 41 of 42 scenario results passed; 29 of 30 on the given 10; 12 of 12 on ours. Total cost $0.0354, about $0.0009 per conversation. "Time per turn" is the server's own time from the trace (first event to last event of one turn), so it leaves out the HTTP hop.
 
+## Per model call, and the sonnet comparison
+
+**Per model call, the three reported runs together** (from the traces; 287 calls, none failed). The per-role costs add up to $0.0353, one hundredth of a cent under the $0.0354 above because each run's total was rounded.
+
+| Role | Model (effort) | Calls | Median / p90 / worst time per call | Cost | Per call |
+|---|---|---|---|---|---|
+| Router | `claude-haiku-5-5` (low) | 77 | 1.12 s / 1.85 s / 4.16 s | $0.0028 | $0.00004 |
+| Specialists (booking, billing, info) | `claude-haiku-5-5` (low) | 204 | 0.94 s / 1.76 s / 16.44 s | $0.0323 | $0.00016 |
+| Second yes layer | `claude-haiku-5-5` (low) | 6 | 1.11 s / 1.22 s / 1.80 s | $0.0002 | $0.00004 |
+
+Thinking tokens are billed as output: they were 11,510 of the specialists' 25,372 output tokens (45%) and none of the router's. A turn is several calls (router, then one to five specialist calls and tool calls), which is why the median turn is 4.4 to 5.5 s while the median call is about 1 s.
+
+**Sonnet comparison (one run, not one of the three).** Same chaos settings, the specialists on `claude-sonnet-5-5` through a temporary edit that was reverted straight afterwards; the router and the yes layer stayed on haiku. Ledger row 10 above; the haiku column is ledger row 7 (the chaos run of the same ten scenarios on the tree just before our four were added). Cost is $0.17 against about $0.01 for a haiku run of all 14.
+
+| | Haiku, chaos, given 10 | Sonnet, chaos, given 10 |
+|---|---|---|
+| Pass rate | 9/10 | 10/10 |
+| Time per turn (25 turns), median / worst | 4.6 s / 16.9 s | 4.7 s / 14.9 s |
+| Cost | $0.0075 | $0.1115 (about 15 times) |
+
+On our four scenarios sonnet passed 4/4 ($0.0579, median 6.3 s per turn); all 14 together 14/14, median 4.7 s, worst 14.9 s, $0.1695. The one haiku failure in that comparison was the router (haiku in both runs) sending a general money question to billing, so sonnet's 10/10 is the router answering differently, not sonnet being better at the specialists' job. One run each cannot tell the two models apart on harder, unseen conversations.
+
 ## Every failing case
 
 There is one, in one run.
