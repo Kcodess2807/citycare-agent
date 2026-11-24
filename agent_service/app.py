@@ -6,10 +6,22 @@ load_dotenv()
 
 from fastapi import FastAPI, HTTPException  # noqa: E402
 
-from . import naive_agent  # noqa: E402
-from .schemas import ChatRequest, ChatResponse  # noqa: E402
+from agentcore.trace import summarize  # noqa: E402
 
-app = FastAPI(title="City Care front desk agent", version="0.1")
+from .schemas import ChatRequest, ChatResponse  # noqa: E402
+from .service import ChatService, build_service  # noqa: E402
+
+app = FastAPI(title="City Care front desk agent", version="0.2")
+
+_service: ChatService | None = None
+
+
+def service() -> ChatService:
+    """Built on first use, so importing the app needs neither a key nor a running hospital."""
+    global _service
+    if _service is None:
+        _service = build_service()
+    return _service
 
 
 @app.get("/health")
@@ -19,11 +31,17 @@ async def health():
 
 @app.post("/chat", response_model=ChatResponse)
 async def chat(req: ChatRequest) -> ChatResponse:
-    # TODO: replace with: emergency check -> router -> specialist agent (all on agentcore)
-    return await naive_agent.handle(req)
+    return await service().handle(req)  # never raises: a failure is still a 200 with a reply
 
 
 @app.get("/trace/{session_id}")
 async def trace(session_id: str):
-    # TODO: return every model call and tool call for this session, with timing, tokens and cost
-    raise HTTPException(status_code=501, detail="Not built yet")
+    """Every model call, tool call, hook decision and state save of this session, plus the totals."""
+    events = await service().traces.get(session_id)
+    if not events:
+        raise HTTPException(status_code=404, detail="No trace for this session")
+    return {
+        "session_id": session_id,
+        "events": [e.model_dump(mode="json") for e in events],
+        "summary": summarize(events).model_dump(mode="json"),
+    }

@@ -32,6 +32,10 @@ class HospitalClient:
     async def aclose(self) -> None:
         await self._http.aclose()
 
+    async def now(self) -> dict[str, Any]:
+        """The hospital's clock (fixed in the mock). Never the machine's."""
+        return await self.get("/now")
+
     async def get(self, path: str, **params: Any) -> Any:
         try:
             r = await self._http.get(path, params={k: v for k, v in params.items() if v is not None})

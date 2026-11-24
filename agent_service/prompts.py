@@ -1,4 +1,4 @@
-"""System prompts and the fixed human-handoff replies.
+"""System prompts and the fixed replies (human handoff, failures).
 
 Every prompt here is a constant. Nothing per patient or per turn goes in a system prompt: the
 prompt and the tool list are the cached prefix, so a changing byte in them would miss the cache
@@ -82,3 +82,26 @@ HUMAN_REPLIES = {
 
 def human_reply(language: str | None) -> str:
     return HUMAN_REPLIES.get(language or "", HUMAN_REPLIES["en"])
+
+
+# Said when a turn failed and nothing was handed to staff. Fixed text, so it never depends on the model.
+FAILURE_REPLIES = {
+    "en": "Sorry, I couldn't do that just now. Please try again in a moment, or ask for our staff and I'll connect you.",
+    "hinglish": "Sorry, abhi main yeh nahi kar paaya. Thodi der mein dobara try karein, ya staff bol dein toh main aapko connect kar dunga.",
+    "hi": "माफ़ कीजिए, अभी मैं यह नहीं कर पाया। थोड़ी देर में फिर कोशिश करें, या स्टाफ़ कहें तो मैं आपको जोड़ दूँगा।",
+}
+
+# Said when something was saved but the turn failed before the reply was written.
+DONE_BUT_NO_REPLY = {
+    "en": "That went through, but I couldn't finish my reply. Please ask me again to see the details, or ask for our staff.",
+    "hinglish": "Woh ho gaya hai, par main apna reply poora nahi kar paaya. Details ke liye dobara poochein, ya staff bol dein.",
+    "hi": "वह हो गया है, पर मैं अपना जवाब पूरा नहीं कर पाया। जानकारी के लिए फिर पूछें, या स्टाफ़ कहें।",
+}
+
+
+def failure_reply(language: str | None) -> str:
+    return FAILURE_REPLIES.get(language or "", FAILURE_REPLIES["en"])
+
+
+def done_but_no_reply(language: str | None) -> str:
+    return DONE_BUT_NO_REPLY.get(language or "", DONE_BUT_NO_REPLY["en"])

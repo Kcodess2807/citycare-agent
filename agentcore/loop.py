@@ -156,13 +156,17 @@ class AgentLoop:
         *,
         lock_held: bool = False,
         history_transform: HistoryTransform | None = None,
+        tracer: Tracer | None = None,
     ) -> LoopResult:
         """`lock_held`: the caller already holds the session lock (it is not re-entrant), so do not take it.
 
         `history_transform`: applied to the turn's messages just before they are committed, and only then.
         The model sees the full messages during the turn; the store gets the transformed list.
+
+        `tracer`: use the caller's tracer, so work done before this turn (a routing call, say) and the turn itself
+        share one trace id. Its session id is what traces are filed under; `session_id` here is the store key.
         """
-        tracer = Tracer(self._traces, session_id, field_limit=self.config.trace_field_chars)
+        tracer = tracer or Tracer(self._traces, session_id, field_limit=self.config.trace_field_chars)
         result: LoopResult | None = None
         try:
             async with contextlib.nullcontext() if lock_held else self._store.lock(session_id):

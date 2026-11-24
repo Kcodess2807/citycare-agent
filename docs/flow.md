@@ -1,6 +1,6 @@
 # How a message moves through the system
 
-Status: Phase 2 design agreed (docs/design-log.md, 2.1 to 2.10). Built so far: agentcore (Phase 1, complete) and Phase 2 commits 1 to 4 (hospital client and read tools, section 6; `lock_held` and `history_transform` on the loop, see the notes under section 2; the router, section 7; the agents and the facts note, section 8). Sections 2 and 3 are implemented; section 1 is the Phase 2 design, built in six commits (2.10). Updated in the same commit as the code it describes.
+Status: Phase 2 design agreed (docs/design-log.md, 2.1 to 2.10). Built so far: agentcore (Phase 1, complete) and Phase 2 commits 1 to 5 (hospital client and read tools, section 6; `lock_held` and `history_transform` on the loop, see the notes under section 2; the router, section 7; the agents and the facts note, section 8; `/chat` and the trace endpoint, section 9, which is what section 1 describes). Sections 2 and 3 are implemented; section 1 is the Phase 2 design, built in six commits (2.10). Updated in the same commit as the code it describes.
 Blocks marked (P2) are built tonight, (P3) in Phase 3.
 
 ## 1. One `/chat` turn (Phase 2 design)
@@ -175,3 +175,35 @@ flowchart LR
 ```
 
 Human handoff makes no model call: the reply is a fixed text in the patient's language, `handoff: true`.
+
+## 9. `/chat` as built (Phase 2 commit 5)
+
+```mermaid
+flowchart TD
+    A[POST /chat: session_id, phone, message] --> K[Storage key = sha256 of phone + session_id]
+    K --> L[Take that key's lock, load history + state]
+    L --> E{emergency check: stub returns None}
+    E -- hit --> X[Clear pending, fixed reply, agent safety, emergency + handoff]
+    E -- none --> R[Router, same Tracer]
+    R -- human --> H[Fixed reply in the patient's language, handoff true]
+    R -- booking --> T[Fetch /now, build facts note]
+    R -- billing / info --> N[Build facts note, no clock]
+    T --> S[run_turn: lock_held, text_only, same Tracer]
+    N --> S
+    S -- done --> OK[Reply = model text, handoff = escalate]
+    S -- failed --> F{Outcomes saved?}
+    F -- unknown --> HO[Human text, handoff]
+    F -- done --> DN[It went through, couldn't finish the reply. Outcomes marked told]
+    F -- none, escalate --> HO
+    F -- none --> FR[Fixed failure text, no handoff]
+    OK --> SV[Save facts, last agent, language]
+    DN --> SV
+    HO --> SV
+    FR --> SV
+    SV --> Z[ChatResponse: reply, agent, handoff, emergency, trace_id. Always 200]
+    X --> Z
+    H --> Z
+    A -. any exception anywhere .-> LR[Human reply en, handoff true, stop event internal] --> Z
+```
+
+`GET /trace/{session_id}`: every event of the session (router and specialist share one trace id per turn) and the totals over all turns. Traces are filed under the request's session id, state under the hashed key, so one session id used by two phones is two conversations with one shared trace list.

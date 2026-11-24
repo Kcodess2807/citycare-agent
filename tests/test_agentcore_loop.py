@@ -616,3 +616,20 @@ def test_a_paused_turn_also_stores_the_transformed_history():
     r = go(rig.loop.run_turn(rig.agent, "s", "[NOTE] n\nyes", history_transform=text_only))
     assert r.status == "paused" and rig.stored().state["pending"] == {"k": 1}
     assert "tool_use" not in str(rig.stored().messages) and "[NOTE]" not in str(rig.stored().messages)
+
+
+def test_a_tracer_from_the_caller_is_used_so_earlier_work_shares_the_trace_id():
+    from agentcore.trace import Tracer
+
+    rig = Rig([text("hi")])
+    tracer = Tracer(rig.traces, "external-id")
+
+    async def scenario():
+        await tracer.record("model_call", "earlier work")
+        return await rig.loop.run_turn(rig.agent, "store-key", "x", tracer=tracer)
+
+    r = go(scenario())
+    events = go(rig.traces.get("external-id"))
+    assert r.trace_id == tracer.trace_id and {e.trace_id for e in events} == {tracer.trace_id}
+    assert [e.seq for e in events] == list(range(1, len(events) + 1)) and events[0].name == "earlier work"
+    assert go(rig.traces.get("store-key")) == []  # traces are filed under the caller's id, state under the key
