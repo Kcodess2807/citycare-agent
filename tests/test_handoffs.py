@@ -230,10 +230,10 @@ def test_the_router_flag_takes_the_emergency_path_and_clears_pending():
     assert not emergency.is_emergency(msg)  # the word lists miss it, which is what the second layer is for
     calls = rig.model_calls
     flagged = text(json.dumps({"agent": "info", "language": "hinglish", "emergency_suspected": True}))
-    r = rig.say(msg, flagged)
+    r = rig.say(msg, text('{"decision": "other"}'), flagged)  # a pending action: the yes layer looks first, then the router
     assert (r.agent, r.emergency, r.handoff) == ("safety", True, True)
     assert r.reply == emergency.reply_for("hinglish") and "108" in r.reply
-    assert "pending" not in rig.state() and rig.model_calls == calls + 1  # only the router ran: no specialist, no tool
+    assert "pending" not in rig.state() and rig.model_calls == calls + 2  # only the yes layer and the router ran: no specialist, no tool
     assert rig.wire.posts() == [] and mine() == []
     rig.say("yes", route_to("booking"), text("What should I book?"))  # nothing is left to confirm
     assert rig.wire.posts() == []

@@ -283,3 +283,16 @@ flowchart TD
     R --> Y2[Next message: strict yes runs it, anything else spends it]
     N -- none or hospital cannot say --> P[Plain: not booked, no pending]
 ```
+
+## Phase 3: the second yes layer (fix 3)
+
+```mermaid
+flowchart TD
+    M[Message, a pending action exists] --> S{strict yes?}
+    S -- yes --> RUN
+    S -- no --> G{sendable? no digit, number word, ?, process word, 25 words or fewer}
+    G -- no --> NY[Not a yes: pending spent, router as usual]
+    G -- yes --> H[One haiku call: read-back + message, answer confirm / change / decline / other]
+    H -- confirm --> RUN[Gate checks again, executor runs the STORED action with the STORED key]
+    H -- anything else, error, timeout, odd output --> NY
+```

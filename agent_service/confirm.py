@@ -175,8 +175,12 @@ def failed_reply(tool: str, reason: str, language: str | None) -> str:
     return _NOT_DONE[lang]
 
 
+def taken_offer_prefix(language: str | None) -> str:
+    return _TAKEN_OFFER[_lang(language)]
+
+
 def taken_offer_reply(readback_text: str, language: str | None) -> str:
-    return f"{_TAKEN_OFFER[_lang(language)]} {readback_text}"
+    return f"{taken_offer_prefix(language)} {readback_text}"
 
 
 def unknown_reply(language: str | None) -> str:

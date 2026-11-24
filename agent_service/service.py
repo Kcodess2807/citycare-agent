@@ -14,7 +14,7 @@ from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import Any
 
-from agent_service import confirm, emergency
+from agent_service import confirm, emergency, yes_layer
 from agent_service.agents import build_agents
 from agent_service.facts import facts_note, merge_facts, text_only, with_note
 from agent_service.gate import Checked, Gate, Refused
@@ -87,7 +87,7 @@ class ChatService:
             pending = state.pop("pending", None)
             if pending is not None:
                 await self.store.save_state(key, state)
-                if isinstance(pending, dict) and confirm.is_yes(req.message, pending.get("tool")):
+                if isinstance(pending, dict) and (confirm.is_yes(req.message, pending.get("tool")) or await self._agrees(pending, req.message, tracer)):
                     return await self._confirmed(key, session.messages, state, pending, req, tracer)
 
             route = await pick_route(
@@ -219,6 +219,16 @@ class ChatService:
         await self._stop(tracer, "confirmed", reply)
         return self._response(reply, agent, tracer, handoff=handoff)
 
+    async def _agrees(self, pending: dict[str, Any], message: str, tracer: Tracer) -> bool:
+        """The second yes layer (design-log 3.9): only after the strict rule said no, and only for a message code lets through."""
+        readback = pending.get("readback")
+        if not readback or not yes_layer.sendable(message):
+            return False
+        decision = await yes_layer.classify(
+            self.client, tracer, readback, message, offer=pending.get("offer"), config=self.config, sleep=self._sleep, rng=self._rng,
+        )
+        return decision == "confirm"
+
     async def _offer_next_slot(self, tool_name: str, inp: Any, data: dict[str, Any]) -> dict[str, Any] | None:
         """After a 409 on a booking: the next free slot with the same doctor, checked and stored as the new pending action."""
         nxt = await self.gate.next_free_slot(inp.doctor_id, inp.start)
@@ -226,7 +236,11 @@ class ChatService:
             return None
         offered = inp.model_copy(update={"start": nxt})
         checked = await self.gate.check(tool_name, offered, data)
-        return self.gate.pending_for(tool_name, offered, checked, data) if isinstance(checked, Checked) else None
+        if not isinstance(checked, Checked):
+            return None
+        pending = self.gate.pending_for(tool_name, offered, checked, data)
+        pending["offer"] = confirm.taken_offer_prefix(data.get("language"))  # what the patient was told before the read-back
+        return pending
 
     def _failure(self, result: LoopResult, language: str) -> tuple[str, bool]:
         statuses = {o.get("status") for o in result.outcomes}

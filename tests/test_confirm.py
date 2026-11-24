@@ -119,7 +119,7 @@ def test_cancel_and_reschedule_read_back_the_real_record_not_the_models_words():
     rig = Rig()
     r = rig.say("cancel my appointment", route_to("booking"), tool_use("cancel_appointment", {"appointment_id": "A1001"}), text("ok"))
     assert "cancel" in r.reply and "Wed 2 Dec 2026, 10:30am" in r.reply and rig.wire.posts() == []
-    r = rig.say("move it", route_to("booking"), tool_use("reschedule_appointment", {"appointment_id": "A1001", "new_start": START}), text("ok"))
+    r = rig.say("move it", text('{"decision": "change"}'), route_to("booking"), tool_use("reschedule_appointment", {"appointment_id": "A1001", "new_start": START}), text("ok"))
     assert "from Wed 2 Dec 2026, 10:30am to Fri 4 Dec 2026, 5:00pm" in r.reply and rig.wire.posts() == []
 
 
