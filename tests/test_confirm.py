@@ -158,11 +158,19 @@ PASS = [
     ("sure", None), ("confirm", None), ("yes please book it", "book_appointment"), ("yes, cancel it", "cancel_appointment"),
     ("yes send the link", "create_payment_link"), ("haan", None), ("haan ji", None), ("ji haan", None), ("haan kar do", None),
     ("theek hai", None), ("haan theek hai kar do", None), ("haan book kar do", "book_appointment"), ("bilkul",  None),
+    # the action word of the pending action's own tool is a yes word
+    ("book it", "book_appointment"), ("please book it", "book_appointment"), ("cancel it", "cancel_appointment"),
+    ("cancel kar do", "cancel_appointment"), ("change it", "reschedule_appointment"), ("send the link", "create_payment_link"),
+    ("बुक कर दो", "book_appointment"), ("कैंसल कर दो", "cancel_appointment"),
     ("हाँ", None), ("हां", None), ("ठीक है", None), ("जी हां", None), ("हां कर दो", None), ("हाँ बुक कर दो", "book_appointment"),
 ]
 FAIL = [
     ("yes but make it 6pm", None), ("yes?", None), ("haan nahi", None), ("5", None), ("yes 6", None), ("12", None),
-    ("no", None), ("nahi", None), ("नहीं", None), ("", None), ("   ", None), ("👍", None), ("please", None), ("book it", "book_appointment"),
+    ("no", None), ("nahi", None), ("नहीं", None), ("", None), ("   ", None), ("👍", None), ("please", None),
+    # ...but never for another tool, and never with no pending action
+    ("book it", "cancel_appointment"), ("cancel it", "book_appointment"), ("book it", "reschedule_appointment"),
+    ("cancel it", "create_payment_link"), ("book it", None), ("cancel it", None), ("बुक कर दो", "cancel_appointment"),
+    ("book it but at 6pm", "book_appointment"), ("book it?", "book_appointment"),
     ("yes cancel it", "book_appointment"),  # an action word for another action
     ("yes please book it", "cancel_appointment"), ("yes but not tomorrow", None), ("haan lekin kal nahi", None),
     ("ok what is the fee", None), ("ठीक है लेकिन कल नहीं", None), ("hmm", None), ("yes and also cancel the other one", "book_appointment"),

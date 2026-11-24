@@ -25,8 +25,8 @@ _AGREE = _words(
     "bhej bhejo now fine good of course absolutely definitely and "
     "जी है हैं कर करो दो दीजिए कीजिए दें प्लीज धन्यवाद शुक्रिया"
 )
-# Words that name the action are agreeing only when they name THE pending action: "yes cancel it" is not
-# a yes to a booking.
+# Words that name the action count only for THE pending action, and then they are yes words themselves:
+# "book it" confirms a booking and "cancel it" confirms a cancel, never the other way round.
 _ACTION = {
     "book_appointment": _words("book booking booked बुक"),
     "reschedule_appointment": _words("reschedule move change shift रीशेड्यूल"),
@@ -39,8 +39,8 @@ def is_yes(message: str, tool: str | None = None) -> bool:
     if "?" in message or "？" in message or "؟" in message:
         return False
     words = _norm(message).split()
-    allowed = _YES | _AGREE | _ACTION.get(tool or "", frozenset())
-    return bool(words) and all(w in allowed for w in words) and any(w in _YES for w in words)
+    own = _ACTION.get(tool or "", frozenset())
+    return bool(words) and all(w in _YES | _AGREE | own for w in words) and any(w in _YES | own for w in words)
 
 
 # ---------------------------------------------------------------- dates
