@@ -1,0 +1,1846 @@
+ ▐▛███▛█   Claude Code v2.1.330
+▝▜██████▀  Sonnet 5.5 · API Usage Billing
+ ▝▝   ▝▝   D:\PROJECTS\citycare-agent
+
+
+⚠ Both claude.ai and ANTHROPIC_API_KEY set · auth may not work as expected
+  · to use claude.ai: Unset ANTHROPIC_API_KEY, or turn off "Use custom API key" in /config.
+  · to use ANTHROPIC_API_KEY: claude /logout to sign out of claude.ai.
+
+❯ /clear                                                                        
+
+❯ change of plan: i have about 4 hours tonight and little time tomorrow,        
+  so phase 3 starts now. read CLAUDE.md, the status and open items in           
+  docs/design-log.md, and agent_service/.                                       
+                                                                                
+  quick design first, 20 minutes max, no code. my starting position,            
+  argue if you disagree:                                                        
+  - emergency: a keyword layer in code for english, hindi (both scripts)        
+    and hinglish. it runs first and can't fail. a model layer only if           
+    there's time.                                                               
+  - confirmation: a write with no confirmed pending action pauses. the          
+    read-back is built by code from the stored params, so the patient           
+    confirms exactly what will run.                                             
+  - a clear yes is matched in code against a small strict list in the           
+    three languages. anything else is not a yes.                                
+  - ownership for id-based writes: the id must be in the caller's own           
+    appointments or bills, fetched by code in that turn.                        
+  - 4-hour rule: the /now clock and the real start time from the                
+    hospital. inside 4 hours, or if /now can't be reached, no change and        
+    a handoff.                                                                  
+  - reaching staff is a real tool that sets handoff. two failures in a          
+    row hand off.                                                               
+                                                                                
+  then build in this order, one commit each, tests with no key:                 
+  1. emergency detector                                                         
+  2. the four write tools on the executor, with verify                          
+  3. confirmation: pause, code read-back, strict yes, run stored params         
+  4. ownership, 4-hour rule, staff-handoff tool, two strikes                    
+  5. one calm run and one chaos run with the budget runner                      
+     tell me what you'd cut if we run short.                                    
+
+● I'll read the design log and the agent service first.
+
+  Read 1 file, ran 6 shell commands (ctrl+o to expand)
+
+● Status: I've read the design log, agent_service/, the executor, hooks and loop
+  pause code, and the mock's write endpoints. Here is the design, with no code
+  written.
+
+  Where I agree, and where I'd change your position
+
+  1. Emergency: agree, with three additions.
+  - It runs in handle() before the router and before the pending-yes check. It
+    clears pending.
+  - Normalise first: NFKC, lowercase, strip punctuation, collapse repeated
+    letters. Match phrases in Latin and Devanagari: seene mein dard, saans nahi 
+    aa rahi, behosh, khoon bah raha, zeher, suicide, and so on.
+  - Bias to false positives. A false alarm costs one 108 message. A miss costs a
+    patient. So there is no negation handling ("I had chest pain last year"
+    also fires).
+  - Add one cheap second layer in place of a model layer. The router's schema
+    gets a boolean emergency_suspected. The router already runs on every
+    message, so this costs no extra call. If it is true, we take the same
+    emergency path. That is about 5 lines.
+  - The reply is a fixed text in three languages (108, the 24-hour ER at the
+    main entrance, no advice). The flags are emergency=true, handoff=true, plus
+    a staff-queue record.
+
+  2. Confirmation: agree, and here is how it fits our runtime.
+  - The write tool is the only thing the model calls. The before_tool hook
+    decides what happens:
+    - No pending action, or the params differ from the stored ones: Pause. Code
+      builds the pending action {tool, params, display, key=uuid4, agent}. The
+      read-back text is built from hospital data fetched in that turn, never
+      from model text.
+    - A pending action marked confirmed, with the same params: Allow.
+  - The write tool ignores the model's params and runs the stored ones with the
+    stored key. A different model call after the yes can't change what runs.
+  - The reply on a pause is the code's read-back. The model's post-pause text is
+    thrown away. A history transform replaces the last assistant message with
+    the read-back, so it is stored together with pending. We already have the
+    history_transform hook for this.
+  - A pending action lives for exactly one turn. The next message either is a
+    strict yes or clears it ("wait, make it 6pm" clears it, and the agent
+    re-proposes). This needs no timers, and an old pending action can never be
+    confirmed by a stray "ok" two hours later. The cost is a little friction.
+
+  3. Strict yes: agree.
+  - A message is a yes only if its whole normalised text is in a set. Examples:
+    yes, yes please, ok, okay, confirm, go ahead, haan, haan ji, theek hai, kar 
+    do, haan kar do, हाँ, ठीक है, कर दो.
+  - "yes but make it 6" is not a yes. A message with a ? is not a yes.
+  - A yes skips the router and goes straight to pending["agent"]. That saves a
+    call and removes the router as a way to misroute a confirmation.
+  - The owning agent gets a system note ("the patient confirmed, call the
+    tool"), and the hook then allows the call.
+
+  4. Ownership: agree, and the same fetch does three jobs.
+  - For reschedule, cancel and payment link, the hook fetches
+    /appointments?phone= or /bills?phone= itself, in that turn. It requires the
+    id to be in the result, the appointment to be booked, or the bill to be
+    unpaid.
+  - The fetched record is also the source for the read-back and for the 4-hour
+    check. The model and the facts note are never the source.
+  - The hook runs again on the confirmed call, so the checks are fresh at
+    execution time.
+  - A failed fetch means Block. It fails closed.
+  - Booking has no id. Its ownership is the injected phone.
+
+  5. 4-hour rule: agree, with the handoff set in code.
+  - A Block alone isn't enough, because the model might not call a staff tool
+    afterwards. The hook itself writes data["handoff"] = reason, plus a
+    staff-queue record, then blocks.
+  - When code set the handoff, the service replies with a fixed three-language
+    template for that reason. It does not use the model's text.
+  - Condition: start - now < 4h goes to staff, and that includes a start that
+    has already passed. A start of exactly 4h is allowed. Assignment.md says
+    "less than 4 hours", so this matches.
+  - /now unreachable, or an unparseable start: no change and a handoff.
+
+  6. Staff tool and two strikes: agree, with these details.
+  - The mock has no staff endpoint. So contact_staff(reason) writes to a
+    service-side queue (an in-memory list mirrored to traces/handoffs.jsonl) and
+    sets handoff. The agents are only allowed to say "staff has been told"
+    after it returned Done. That fixes finding 1 from the calm run.
+  - It is on all three specialists. The prompts change from "offer staff" to
+    "call contact_staff when the patient asks for a person or you can't help".
+  - Watch scenario 09. Insurance is not in the docs. If info calls contact_staff
+    unprompted, handoff goes true. That check allows it, but unseen scenarios
+    may not. I'd say: info answers "I don't know" and offers staff, and only
+    calls the tool when the patient asks.
+  - A strike is a turn that ends in a failure template. That means a failed loop
+    or an Unknown write outcome. The counter lives in state. It resets on any
+    done or paused turn. At 2 the patient gets the handoff template and
+    handoff=true.
+  - I'd drop "same request" and count consecutive failed turns. It is simpler
+    and errs towards a person.
+  - This deviates from 2.3, which says a router fallback is a strike. A router
+    fallback where the specialist then answers is not a failed turn, so it won't
+    count.
+
+  What each write does
+
+  Tool: book_appointment
+  Hook checks: phone is injected; read-back from /doctors
+  Executor: key from pending, atomic, retry on 503 only
+  Verify after 503/timeout: list_appointments has a booked one at that doctor
+    and start
+  ────────────────────────────────────────
+  Tool: reschedule
+  Hook checks: ownership, booked, 4h
+  Executor: atomic, no key, not retried
+  Verify after 503/timeout: the appointment's start equals the new start
+  ────────────────────────────────────────
+  Tool: cancel
+  Hook checks: ownership, booked, 4h
+  Executor: same
+  Verify after 503/timeout: the status is cancelled
+  ────────────────────────────────────────
+  Tool: payment_link
+  Hook checks: ownership, unpaid
+  Executor: cached link per session (0.1/0.4)
+  Verify after 503/timeout: no lookup endpoint, so retry on 503 only, and a
+    timeout gives Unknown and a handoff
+
+  Build order (your five steps, with my adjustments)
+
+  1. Emergency detector. Tests include a table of English, Hindi and Hinglish
+     phrases, near-misses, and typos. Also the emergency_suspected router field
+     if it fits.
+  2. Four write tools, plus the hospital client's post. Verify callables and the
+     /now call. Tests use MockTransport, covering 503 saved, 503 not saved,
+     timeout, 409.
+  3. Confirmation. The pause hook, the code read-back, the strict-yes handling
+     in handle(), the one-turn lifetime, and the stored-params run.
+  4. Ownership, 4-hour rule, contact_staff, two strikes, and the prompt changes.
+     The prompts change last in this step, so the cache prefix changes once.
+  5. One calm run and one chaos run with the budget runner.
+
+  Every commit has tests that pass with no key, plus design-log.md and flow.md
+  updates. I stop for your ok before each commit, as in CLAUDE.md.
+
+  What I'd cut if we run short (in this order)
+
+  1. The router's emergency_suspected field, which leaves the keyword layer
+     alone.
+  2. The slot-is-in-free-list check at proposal time. The mock's 400 and 409
+     already cover it.
+  3. Hindi and Hinglish variants of the fixed handoff and strike templates.
+     English plus Hinglish first.
+  4. The chaos run, replaced by a short one-scenario chaos probe. The real 3×3
+     chaos runs belong to Phase 4/5 anyway.
+
+  Never cut: the emergency check, the confirm gate, ownership, the 4-hour rule,
+  the handoff flag set in code, and pytest with no key.
+
+  Two decisions for you
+
+  - Payment link after a timeout. I'd treat it as Unknown and hand off, since we
+    can't look up existing links and a duplicate link is harmless but
+    unverifiable. Alternatively we retry once. Do you want the handoff version?
+  - Pausing the loop. After a pause or a code-set handoff, the loop makes one
+    more model call whose text we then discard. That costs about $0.001 per
+    write. I'd accept that rather than touch agentcore under time pressure. A
+    generic "end the turn now" option can wait for the cleanup phase.
+
+  Say go and I start with commit 1. Remember to /export this session as
+  claude-sessions/0N-phase3-design.txt before any /clear.
+
+✻ Brewed for 2m 3s · done 11:17 PM
+
+❯ C                                                                             
+  go, with three changes:                                                       
+  1. on a strict yes, code runs the stored action itself (as 1.5 said),         
+     it doesn't wait for the model to call the tool. the reply about a          
+     write comes from the real result: booked only on done, handoff on          
+     unknown. why did the design move away from 1.5?                            
+  2. the yes list is too narrow, "yes please book it" would fail. make          
+     it: every word is in a small agreeing vocabulary in the three              
+     languages and at least one is a yes word. any other word, number or        
+     "?" means not a yes.                                                       
+  3. a blocked id says the same thing whether it's someone else's or            
+     doesn't exist, and never echoes a doctor, time or name.                    
+     payment link timeout: handoff version. the extra model call is fine.       
+     start commit 1.                                                            
+
+  Ran 2 shell commands (ctrl+o to expand)
+
+● Writing the detector.
+
+● Write(agent_service\emergency.py)
+  ⎿  Added 110 lines, removed 5 lines
+        1 -"""The emergency check. It runs in `ChatService.handle` before
+          - the router and before anything else.                         
+        1 +"""The emergency check. Plain code, no model: it runs in `Chat
+          +Service.handle` before the router and                         
+        2 +before anything else, so it cannot fail because an API call fa
+          +iled (design-log 3.1).                                        
+        3 
+        3 -Tonight this is a stub that never fires: the call site, and wh
+          -at a hit does, are built and tested                           
+        4 -so the shape of `handle` does not change. Phase 3 replaces the
+          - body with code that recognises an                            
+        5 -emergency in English, Hindi and Hinglish (design-log 2.2).    
+        4 +Matching works on normalised words (lowercase, no punctuation,
+          + repeated letters collapsed, Devanagari                       
+        5 +spelling variants merged), in three ways: a phrase, a single s
+          +trong word, or two word groups that                           
+        6 +both appear anywhere in the message ("seene" + "dard"). It lea
+          +ns towards false alarms on purpose:                           
+        7 +a false alarm costs one reply with 108 in it, a miss costs a p
+          +atient. There is no negation handling.                        
+        8 +                                                              
+        9 +Known limit: spelling variants that are not listed (and typos 
+          +beyond doubled letters) are missed.                           
+       10  """
+       11 
+       12  from __future__ import annotations
+       13 
+       14 +import re                                                     
+       15 +import unicodedata                                            
+       16 
+       17 +_DROP = dict.fromkeys(map(ord, "'’`़"))  # apostrophes, nukta, 
+          +zero-width joiners                                            
+       18 +_DROP[0x0901] = 0x0902  # chandrabindu -> anusvara, so साँस and
+          + सांस match                                                    
+       19 +                                                              
+       20 +                                                              
+       21 +def _norm(text: str) -> str:                                  
+       22 +    text = unicodedata.normalize("NFKC", text).lower().transla
+          +te(_DROP)                                                     
+       23 +    # Anything that is not a letter, mark or digit is a separa
+          +tor. Marks stay: Devanagari vowel signs are marks.            
+       24 +    text = "".join(c if unicodedata.category(c)[0] in "LMN" el
+          +se " " for c in text)                                         
+       25 +    return re.sub(r"(.)\1+", r"\1", text)  # "behoosh" -> "beh
+          +osh". Vocabulary goes through the same function.              
+       26 +                                                              
+       27 +                                                              
+       28 +def _words(s: str) -> frozenset[str]:                         
+       29 +    return frozenset(_norm(s).split())                        
+       30 +                                                              
+       31 +                                                              
+       32 +def _phrases(s: str) -> tuple[str, ...]:                      
+       33 +    return tuple(f" {_norm(p).strip()} " for p in s.split(",")
+          +)                                                             
+       34 +                                                              
+       35 +                                                              
+       36 +# One strong word is enough.                                  
+       37 +_WORDS = _words(                                              
+       38 +    "behosh unconscious unconcious fainted fainting faint coll
+          +apsed seizure seizures convulsion convulsions "               
+       39 +    "stroke poison poisoned poisoning overdose suicide suicida
+          +l breathless breathlessness choking gasping "                 
+       40 +    "zeher jehar khudkushi aatmahatya lakwa paralysis paralyze
+          +d paralysed mirgi "                                           
+       41 +    "बेहोश जहर आत्महत्या लकवा मिर्गी खुदकुशी"                       
+       42 +)                                                             
+       43 +                                                              
+       44 +_PHRASES = _phrases(                                          
+       45 +    "heart attack,dil ka daura,दिल का दौरा,हार्ट अटैक,medical em
+          +ergency,this is an emergency,its an emergency,"               
+       46 +    "emergency hai,emergency hua,emergency ho,इमरजेंसी है,need an
+          + ambulance,need ambulance,call an ambulance,"                 
+       47 +    "call ambulance,send an ambulance,send ambulance,ambulance
+          + bulao,ambulance chahiye,एम्बुलेंस बुलाओ,"                         
+       48 +    "cant breathe,cannot breathe,unable to breathe,short of br
+          +eath,shortness of breath,difficulty breathing,"               
+       49 +    "trouble breathing,dam ghut,दम घुट,"                       
+       50 +    "bahut khoon,bohot khoon,zyada khoon,jyada khoon,khoon bah
+          +ut,बहुत खून,खून बहुत,"                                            
+       51 +    "kill myself,end my life,end it all,want to die,wanna die,
+          +dont want to live,no reason to live,hurt myself,"             
+       52 +    "harm myself,self harm,mar jaunga,mar jaungi,marna chahta,
+          +marna chahti,jeena nahi chahta,jeena nahi chahti,"            
+       53 +    "jaan de dunga,jaan de dungi,मर जाऊंगा,मर जाऊंगी,मरना चाहता,
+          +मरना चाहती,जीना नहीं चाहता,जीना नहीं चाहती,जान दे दूंगा,"          
+       54 +    "face drooping,face droop,slurred speech,speech slurred,ca
+          +nt speak,muh tedha,zubaan ladkhada,"                          
+       55 +    "daura pad,daure pad,fits aa,"                            
+       56 +    "serious injury,severe injury,had an accident,in an accide
+          +nt,road accident,car accident,bike accident,"                 
+       57 +    "accident hua,accident ho gaya,accident ho gayi,badi chot,
+          +gehri chot,gambhir chot,गंभीर चोट"                             
+       58 +)                                                             
+       59 +                                                              
+       60 +# Two groups: the message needs a word from each.             
+       61 +_PAIRS = [                                                    
+       62 +    (                                                         
+       63 +        _words("chest seena seene sina sine chhati chati dil h
+          +eart सीने सीना छाती दिल"),                                     
+       64 +        _words("pain painful dard hurts hurting tightness tigh
+          +t pressure jakdan दर्द जकड़न"),                                 
+       65 +    ),                                                        
+       66 +    (                                                         
+       67 +        _words("saans sans breath breathe breathing सांस साँस"),
+       68 +        _words(                                               
+       69 +            "nahi nahin not cant cannot unable taklif takleef 
+          +tkleef problem trouble difficulty difficult hard "            
+       70 +            "mushkil dikkat ruk rukk band short shortness phoo
+          +l phul नहीं तकलीफ दिक्कत मुश्किल रुक बंद फूल"                        
+       71 +        ),                                                    
+       72 +    ),                                                        
+       73 +    (_words("khoon khun blood bleeding rakt खून रक्त"), _words("
+          +bah beh behta behne nikal heavy severe nonstop profuse wont ru
+          +kk ruk बह बहने निकल रुक")),                                     
+       74 +    (_words("hosh होश"), _words("nahi nahin gaya khoya नहीं खो"
+          +)),                                                           
+       75 +    (_words("chot injury injured fracture fractured चोट"), _wo
+          +rds("gambhir serious severe badi gehri critical गंभीर")),      
+       76 +]                                                             
+       77 +                                                              
+       78 +_REPLIES = {                                                  
+       79 +    "en": (                                                   
+       80 +        "This sounds like an emergency. Please call 108 now, o
+          +r go to the nearest emergency room. "                         
+       81 +        "Our Emergency department at the main entrance is open
+          + 24 hours. Our staff have been alerted."                      
+       82 +    ),                                                        
+       83 +    "hinglish": (                                             
+       84 +        "Yeh emergency lag rahi hai. Abhi 108 par call karein,
+          + ya sabse paas ke emergency room jaayein. "                   
+       85 +        "Hamara Emergency department main entrance par 24 ghan
+          +te khula hai. Hamare staff ko bata diya gaya hai."            
+       86 +    ),                                                        
+       87 +    "hi": (                                                   
+       88 +        "यह आपातकाल लग रहा है। अभी 108 पर कॉल करें, या नज़दीकी इमर
+          +जेंसी रूम जाएँ। "                                                 
+       89 +        "हमारा इमरजेंसी विभाग मुख्य प्रवेश द्वार पर 24 घंटे खुला है। हमारे
+          + स्टाफ़ को सूचित कर दिया गया है।"                                 
+       90 +    ),                                                        
+       91 +}                                                             
+       92 +                                                              
+       93 +_HINGLISH = _words(                                           
+       94 +    "mujhe mere meri mera hai hain ho hua hui raha rahi rahe n
+          +ahi nahin bahut bohot dard taklif mein ko ka ki ke "          
+       95 +    "kal aaj abhi chahiye kar karo bhi aur par se"            
+       96 +)                                                             
+       97 +                                                              
+       98 +                                                              
+       99 +def reply_language(message: str) -> str:                      
+      100 +    if any("ऀ" <= c <= "ॿ" for c in message):                  
+      101 +        return "hi"                                           
+      102 +    return "hinglish" if len(_words(message) & _HINGLISH) >= 2
+          + else "en"                                                    
+      103 +                                                              
+      104 +                                                              
+      105 +def is_emergency(message: str) -> bool:                       
+      106 +    text = _norm(message)                                     
+      107 +    words = set(text.split())                                 
+      108 +    padded = f" {' '.join(text.split())} "                    
+      109 +    return bool(                                              
+      110 +        words & _WORDS                                        
+      111 +        or any(p in padded for p in _PHRASES)                 
+      112 +        or any(words & a and words & b for a, b in _PAIRS)    
+      113 +    )                                                         
+      114 +                                                              
+      115 +                                                              
+      116  def check_emergency(message: str) -> str | None:
+      117      """The fixed reply to send if `message` describes an emerg
+           ency, else None."""
+       13 -    return None                                               
+      118 +    return _REPLIES[reply_language(message)] if is_emergency(m
+          +essage) else None                                             
+
+● Write(tests\test_emergency.py)
+  ⎿  Wrote 85 lines to tests\test_emergency.py
+       1 import pytest
+       2 
+       3 from agent_service.emergency import check_emergency, is_emergenc
+         y, reply_language
+       4 
+       5 EMERGENCIES = [
+       6     # English
+       7     "I have chest pain and I can't breathe",
+       8     "my father is unconscious, please help",
+       9     "she fainted and won't wake up",
+     … +76 lines (ctrl+o to expand)
+
+● Update(tests\test_service_chat.py)
+  ⎿  Added 7 lines, removed 3 lines
+      357      assert rig.history()[-1] == {"role": "assistant", "content
+           ": r.reply}
+      358 
+      359 
+      360 -# ---- emergency call site (the real check is Phase 3)        
+      360 +# ---- emergency call site (the detector itself is tested in t
+          +est_emergency.py)                                             
+      361 
+      362 
+      363 -def test_the_stub_never_fires():                              
+      364 -    assert emergency.check_emergency("I have chest pain and ca
+          -nnot breathe") is None                                        
+      363 +def test_a_real_emergency_message_never_reaches_a_model():    
+      364 +    rig = Rig([])  # an empty script: any model call would fai
+          +l the test                                                    
+      365 +    r = rig.chat("Mujhe seene mein bahut dard ho raha hai aur 
+          +saans lene mein taklif hai")                                  
+      366 +    check_contract(r)                                         
+      367 +    assert (r.agent, r.handoff, r.emergency) == ("safety", Tru
+          +e, True) and "108" in r.reply                                 
+      368 +    assert rig.calls == []                                    
+      369 
+      370 
+      371  def test_a_hit_skips_the_router_clears_pending_and_flags_every
+           thing(monkeypatch):
+
+  Ran 1 shell command (ctrl+o to expand)
+
+● A real miss: the words aren't adjacent. I'll add a face-droop pair and treat
+  "slurred" as a strong word.
+
+● Bash(python - <<'EOF'
+      p='agent_service/emergency.py'…)
+  ⎿  ============================= test session starts ====================
+     =========
+     platform win32 -- Python 3.11.5, pytest-9.2.0, pluggy-1.7.0
+     … +26 lines (ctrl+o to expand)
+  ⎿  Updated agent_service\emergency.py +119 -118
+        1 -"""The emergency check. Plain code, no model: it runs in `Chat
+          -Service.handle` before the router and                         
+        2 -before anything else, so it cannot fail because an API call fa
+          -iled (design-log 3.1).                                        
+        3 -                                                              
+        4 -Matching works on normalised words (lowercase, no punctuation,
+          - repeated letters collapsed, Devanagari                       
+        5 -spelling variants merged), in three ways: a phrase, a single s
+          -trong word, or two word groups that                           
+        6 -both appear anywhere in the message ("seene" + "dard"). It lea
+          -ns towards false alarms on purpose:                           
+        7 -a false alarm costs one reply with 108 in it, a miss costs a p
+          -atient. There is no negation handling.                        
+        8 -                                                              
+        9 -Known limit: spelling variants that are not listed (and typos 
+          -beyond doubled letters) are missed.                           
+       10 -"""                                                           
+       11 -                                                              
+       12 -from __future__ import annotations                            
+       13 -                                                              
+       14 -import re                                                     
+       15 -import unicodedata                                            
+       16 -                                                              
+       17 -_DROP = dict.fromkeys(map(ord, "'’`़"))  # apostrophes, nukta, 
+          -zero-width joiners                                            
+       18 -_DROP[0x0901] = 0x0902  # chandrabindu -> anusvara, so साँस and
+          - सांस match                                                    
+       19 -                                                              
+       20 -                                                              
+       21 -def _norm(text: str) -> str:                                  
+       22 -    text = unicodedata.normalize("NFKC", text).lower().transla
+          -te(_DROP)                                                     
+       23 -    # Anything that is not a letter, mark or digit is a separa
+          -tor. Marks stay: Devanagari vowel signs are marks.            
+       24 -    text = "".join(c if unicodedata.category(c)[0] in "LMN" el
+          -se " " for c in text)                                         
+       25 -    return re.sub(r"(.)\1+", r"\1", text)  # "behoosh" -> "beh
+          -osh". Vocabulary goes through the same function.              
+       26 -                                                              
+       27 -                                                              
+       28 -def _words(s: str) -> frozenset[str]:                         
+       29 -    return frozenset(_norm(s).split())                        
+       30 -                                                              
+       31 -                                                              
+       32 -def _phrases(s: str) -> tuple[str, ...]:                      
+       33 -    return tuple(f" {_norm(p).strip()} " for p in s.split(",")
+          -)                                                             
+       34 -                                                              
+       35 -                                                              
+       36 -# One strong word is enough.                                  
+       37 -_WORDS = _words(                                              
+       38 -    "behosh unconscious unconcious fainted fainting faint coll
+          -apsed seizure seizures convulsion convulsions "               
+       39 -    "stroke poison poisoned poisoning overdose suicide suicida
+          -l breathless breathlessness choking gasping "                 
+       40 -    "zeher jehar khudkushi aatmahatya lakwa paralysis paralyze
+          -d paralysed mirgi "                                           
+     … +197 lines (ctrl+o to expand)
+
+● Tests pass. Now the docs for the same commit.
+
+● Bash(python - <<'EOF'
+      p='docs/flow.md'…)
+  ⎿   M agent_service/emergency.py
+      M docs/design-log.md
+      M docs/flow.md
+     … +10 lines (ctrl+o to expand)
+  ⎿  Updated docs\design-log.md +21 -1
+      2 
+      3  ## Status
+      4 
+      5 -- **Current phase:** 2 (router, agents, handoffs): design agreed
+        -, all 6 commits built, one calm run recorded (2.11, 2.12), the h
+        -aiku vs sonnet comparison moved to after Phase 3. Phase 1 is com
+        -plete: agentcore commits 1 to 8 are pushed and nothing was cut. 
+        -Phase 1 to 2 quiz passed 9/10 (the one miss: when `verify` itsel
+        -f fails the result is `Unknown`, not `Failed`)                  
+      5 +- **Current phase:** 3 (safety hooks): design agreed (3.1 to 3.6
+        +), commit 1 (emergency detector) built. Phase 2 is done: 6 commi
+        +ts, one calm run (2.11, 2.12); the haiku vs sonnet comparison mo
+        +ved to after Phase 3. Phase 1 is complete: agentcore commits 1 t
+        +o 8 are pushed and nothing was cut. Phase 1 to 2 quiz passed 9/1
+        +0 (the one miss: when `verify` itself fails the result is `Unkno
+        +wn`, not `Failed`)                                              
+      6  - **Code written:** `agentcore/` config, error and result types,
+          boundary test (commit 1); trace events, cost and trace store (c
+         ommit 2); session store (commit 3); tool registry (commit 4); ho
+         oks (commit 5); retry helper and atomic executor (commit 6); age
+         nt loop (commit 7); real-API smoke test (commit 8)
+      7  - **Decided:**
+      8    - Phase 0 (0.1 to 0.5): payment links retry on 503 only and ar
+         e cached per session; the eval runner uses one session per scena
+         rio per run; a timeout on a write is treated like saved-then-503
+         ; the booking key is fresh per confirmation and lives in the pen
+         ding action
+     ...
+      529  3. **The model once dropped the last slot of a list** (scenari
+           o 01, turn 1: it listed 5:00 to 7:00pm, then "sorry, my earlie
+           r list was incomplete" and added 7:30pm). It fixed itself on a
+            second read. One instance, noted, not acted on.
+      530 
+      531  **Not measured by this run:** chaos (503s, latency, saved-then
+           -503, races), anything involving writes, accuracy on unseen sc
+           enarios, and the haiku vs sonnet comparison for the specialist
+           s. **The haiku vs sonnet comparison moves to after Phase 3** (
+           decided by the user): without write tools it would compare mod
+           els on a task they cannot finish, and it costs real money, so
+           it waits for writes and for a go and a stop.
+      532 +                                                              
+      533 +                                                              
+      534 +---                                                           
+      535 +                                                              
+      536 +## Phase 3: safety in code (design agreed 2026-11-24)         
+      537 +                                                              
+      538 +### 3.1 Emergency detector (commit 1)                         
+      539 +- **Plain code, first, no model.** `agent_service/emergency.py
+          +`, called in `handle()` before the router and before any pendi
+          +ng-yes handling. A hit clears `pending`, sends a fixed reply i
+          +n the patient's language, `emergency=true`, `handoff=true`, tr
+          +ace event `emergency`. The staff-queue record comes with `cont
+          +act_staff` (commit 4).                                        
+      540 +- **How it matches.** Normalise (NFKC, lowercase, punctuation 
+          +to spaces, apostrophes and nukta dropped, chandrabindu to anus
+          +vara, doubled letters collapsed, so "behoooosh" matches). Then
+          + three rules: one strong word (*behosh, seizure, zeher, मिर्गी*
+          +), a phrase (*cant breathe, dil ka daura, mar jaunga*), or two
+          + word groups that both appear anywhere in the message (*seene*
+          + + *dard*, *saans* + *nahi*, face + droop). Vocabulary goes th
+          +rough the same normaliser as the message.                     
+      541 +- **Leans to false alarms.** A false alarm costs one reply wit
+          +h 108 in it; a miss costs a patient. No negation handling: "I 
+          +had chest pain last year" fires. Words that only name a place 
+          +or a test (*emergency department*, *chest x-ray*, *blood test*
+          +, *blood pressure*) do not fire alone, so info questions are n
+          +ot flagged.                                                   
+      542 +- **Found by our own test, not a given scenario:** "his face i
+          +s drooping and his speech is slurred" missed (the words were n
+          +ot adjacent). Fixed with a face + droop pair and *slurred* as 
+          +a strong word. The test table has 33 emergency messages and 15
+          + ordinary ones, written without looking at the 10 scenarios.  
+      543 +- **Known limit (for DESIGN.md):** spellings not in the lists 
+          +and typos beyond doubled letters are missed. The second layer 
+          +(a router `emergency_suspected` field) is **not built yet**. I
+          +t is cut-list item 1.                                         
+      544 +- **Reply language:** Devanagari anywhere gives Hindi; two or 
+          +more common Hinglish words give Hinglish; otherwise English. E
+          +ach reply says 108, nearest ER, the 24-hour Emergency departme
+          +nt at the main entrance, and gives no advice.                 
+      545 +                                                              
+      546 +### 3.2 Agreed with the user (changes to my first proposal)   
+      547 +- **Confirmed write: code runs the stored action itself.** My 
+          +first draft had the model call the write tool again after "yes
+          +", with a hook allowing it. That moved away from 1.5, which sa
+          +ys code runs the stored payload. The reason was convenience (t
+          +he model phrases the result, the hooks stay in one place). It 
+          +was the wrong trade: a model that skips the call or words the 
+          +outcome loosely breaks "never say something happened when it d
+          +idn't". Back to 1.5: on a strict yes, code runs the stored act
+          +ion through the same registry, hooks and executor. The reply a
+          +bout a write comes from the real result: "booked" only on `Don
+          +e`, a handoff on `Unknown`.                                   
+      548 +- **Strict yes is a vocabulary test, not a list of whole messa
+          +ges.** Every word must be in a small agreeing vocabulary (Engl
+          +ish, Hindi, Hinglish) and at least one must be a yes word. Any
+          + other word, any digit or a "?" means not a yes ("yes please b
+          +ook it" passes, "yes but make it 6" does not).                
+      549 +- **A blocked id says one thing.** Someone else's id and an id
+          + that does not exist get the same reason, and it never repeats
+          + a doctor, time or name.                                      
+      550 +- **Payment link after a timeout:** `Unknown`, handoff.       
+      551 +- **One extra model call after a pause or a code-set handoff**
+          + is accepted (about $0.001 per write); its text is discarded. 
+  ⎿  Updated docs\flow.md +3 -3
+      10  ```mermaid
+      11  flowchart TD
+      12      A[POST /chat: session_id, phone, message] --> L[Take the se
+          ssion lock, load state]
+      13 -    L --> E[Emergency check: stub returns None tonight, real ch
+         -eck P3]                                                        
+      14 -    E -- emergency P3 --> X[Fixed reply: call 108, emergency=tr
+         -ue, handoff, clear pending]                                    
+      13 +    L --> E[Emergency check: keyword code, en/hi/hinglish, no m
+         +odel]                                                          
+      14 +    E -- emergency --> X[Fixed reply: call 108, emergency=true,
+         + handoff, clear pending]                                       
+      15      E -- ok --> R[Router: haiku, structured output: agent + lan
+          guage]
+      16      R -- unusable output --> RF[Fallback: last turn's agent, el
+          se info]
+      17      R -- ok --> S
+     ...
+      182  flowchart TD
+      183      A[POST /chat: session_id, phone, message] --> K[Storage ke
+           y = sha256 of phone + session_id]
+      184      K --> L[Take that key's lock, load history + state]
+      185 -    L --> E{emergency check: stub returns None}               
+      185 +    L --> E{emergency check: keyword code (agent_service/emerg
+          +ency.py)}                                                     
+      186      E -- hit --> X[Clear pending, fixed reply, agent safety, e
+           mergency + handoff]
+      187      E -- none --> R[Router, same Tracer]
+      188      R -- human --> H[Fixed reply in the patient's language, ha
+           ndoff true]
+
+● Commit 1 is ready and waiting for your ok. pytest passes with no key: 344
+  passed, up from 296 before this commit. There's no key in the diff.
+
+  Why the design moved away from 1.5: it was my mistake. I let the model re-call
+  the write tool after "yes" because that was easier: the model words the
+  result, and the hooks stay in one place. That breaks "never say something
+  happened when it didn't", because a model that skips the call or words the
+  outcome loosely can misreport. Your change puts it back to 1.5. I wrote this
+  up in the log (3.2) so the reversal is on record. The three changes are noted
+  there and land in commits 3 and 4.
+
+  What changed
+  - agent_service/emergency.py is now a real detector. It normalises the message
+    (case, punctuation, doubled letters, Devanagari spelling variants) and then
+    matches strong words, phrases, or two word groups that both appear. That
+    covers English, Hindi in Devanagari, and Hinglish.
+  - It leans towards false alarms on purpose. Words that only name a place or a
+    test (emergency department, chest x-ray, blood pressure) don't fire alone.
+  - The fixed reply is in the patient's language: 108, the nearest ER, the
+    24-hour Emergency department, and no advice.
+  - The handle() call site is unchanged. A hit still skips the router and clears
+    pending.
+  - tests/test_emergency.py has 33 emergency messages and 15 ordinary ones,
+    written without looking at the 10 scenarios. It found a real miss: "face is
+    drooping … speech is slurred". I fixed that with a face + droop pair and
+    treated "slurred" as a strong word.
+  - In tests/test_service_chat.py, the old test that checked the stub never
+    fires became a test that an emergency message never reaches a model.
+  - docs/design-log.md has new entries 3.1 and 3.2, and docs/flow.md is updated.
+
+  Known limit, not built: spellings not in the lists, and typos beyond doubled
+  letters, are missed. The router emergency_suspected second layer isn't built
+  (cut-list item 1).
+
+  Proposed message: Add emergency detector in code for English, Hindi and 
+  Hinglish. The body says it runs before the router, leans to false alarms, and
+  has no model dependency.
+
+  Say ok and I'll commit and push to main. Then I'll start commit 2, the four
+  write tools with verify.
+
+✻ Cogitated for 2m 16s · done 11:23 PM
+
+❯ ok once you give me the unpiped pytest count with no key. then commit,        
+  push, and start commit 2.                                                     
+                                                                                
+  - keep the router emergency_suspected flag, don't cut it. it covers           
+    the spellings the keyword list misses. add it in commit 4 with the          
+    prompt changes.                                                             
+  - in commit 2 the write tools are built and tested but not given to           
+    any agent. no commit should exist where a model can write without           
+    the confirmation gate.                                                      
+                                                                                
+  tests i want by name in commit 2: book gets a 503 that didn't save,           
+  retries with the same key, exactly one booking; book saved then 503,          
+  verify finds it, exactly one booking; book gets 409, no retry;                
+  reschedule saved then 503, no retry, verify says done; cancel 503 that        
+  didn't save, verify says still booked, result is failed; payment link         
+  503 is retried; payment link timeout is unknown; a second link request        
+  for the same bill returns the cached one.                                     
+
+  Ran 5 shell commands (ctrl+o to expand)
+
+● Working on commit 2: the async client gets a post, the four write tools get
+  verify, and the tests run against the real mock app.
+
+  Ran 2 shell commands · 1 failed (ctrl+o to expand)
+
+● Nothing ran, so I'll use the file tools instead.
+
+  Read 1 file (ctrl+o to expand)
+
+● Update(agent_service\hospital.py)
+  ⎿  Added 7 lines, removed 1 line
+      37          return await self.get("/now")
+      38 
+      39      async def get(self, path: str, **params: Any) -> Any:
+      40 +        return await self._send("GET", path, params={k: v for k
+         +, v in params.items() if v is not None})                       
+      41 +                                                               
+      42 +    async def post(self, path: str, body: dict[str, Any] | None
+         + = None) -> Any:                                               
+      43 +        return await self._send("POST", path, json=body or {}) 
+      44 +                                                               
+      45 +    async def _send(self, method: str, path: str, **kw: Any) ->
+         + Any:                                                          
+      46          try:
+      41 -            r = await self._http.get(path, params={k: v for k, 
+         -v in params.items() if v is not None})                         
+      47 +            r = await self._http.request(method, path, **kw)   
+      48          except httpx.TimeoutException as e:
+      49              raise ToolOutcomeUnknown(f"The hospital system did 
+          not answer in time ({type(e).__name__}).") from e
+      50          except httpx.TransportError as e:
+
+● Update(agent_service\hospital.py)
+  ⎿  Added 1 line, removed 1 line
+      1 -"""Async client for the hospital system. Reads only for now (wri
+        -tes arrive in Phase 3).                                         
+      1 +"""Async client for the hospital system.                        
+      2 
+      3  No retries here: the executor owns retry. This client only turns
+          every outcome into a value or a
+      4  typed agentcore error, so the executor can tell "refused" from "
+         try again" from "no answer".
+
+● Write(agent_service\write_tools.py)
+  ⎿  Wrote 153 lines to agent_service\write_tools.py
+       1 """The four write tools: book, reschedule, cancel, payment link.
+          Built and tested, given to NO agent.
+       2 
+       3 Nothing here decides whether a write is allowed. Who owns the id
+         , the 4-hour rule and the patient's
+       4 yes are checked by hooks and by the confirmation code (design-lo
+         g 3.x). A model must never be able to
+       5 reach these tools without that gate, so `agents.py` does not imp
+         ort this module (tested).
+       6 
+     … +147 lines (ctrl+o to expand)
+
+● Write(tests\test_write_tools.py)  ⎿  Wrote 232 lines to tests\test_write_tools.py
+       1 """The write tools against the REAL mock hospital app, with scri
+         pted faults.
+       2 
+       3 The mock's chaos functions are replaced by scripts so each test 
+         says exactly which call fails and how.
+       4 """
+       5 
+       6 import asyncio
+       7 
+       8 import httpx
+     … +224 lines (ctrl+o to expand)
+
+  Ran 1 shell command (ctrl+o to expand)
+
+● All 19 pass. I'll tidy one import, then add the docs and run the full suite.
+
+● Bash(sed -i 's/__import__("json")/json/; s/^import asyncio$/import
+      asyncio\nimport json/' tests/test_write_tools.py && cat >>
+      docs/design-log.md <<'EOF'…)
+  ⎿  ============================= test session starts ====================
+     =========
+     platform win32 -- Python 3.11.5, pytest-9.2.0, pluggy-1.7.0
+     … +27 lines (ctrl+o to expand)
+  ⎿  Updated docs\design-log.md +10
+      549  - **A blocked id says one thing.** Someone else's id and an id
+            that does not exist get the same reason, and it never repeats
+            a doctor, time or name.
+      550  - **Payment link after a timeout:** `Unknown`, handoff.
+      551  - **One extra model call after a pause or a code-set handoff**
+            is accepted (about $0.001 per write); its text is discarded.
+      552 +                                                              
+      553 +### 3.3 The four write tools (commit 2): built, tested, given 
+          +to no agent                                                   
+      554 +- **No agent has them.** `agents.py` and `service.py` do not i
+          +mport `write_tools.py`, and a test checks both that and the ag
+          +ents' tool lists. No commit may exist where a model can write 
+          +without the confirmation gate (user's rule). They are wired in
+          + only through code that has run the gate (commit 3).          
+      555 +- **Inputs have no phone and no key.** The phone is `ctx.data[
+          +"phone"]`, the booking key is `ctx.data["idempotency_key"]`, b
+          +oth put there by code from the pending action. `book` refuses 
+          +to run without a key, so an unkeyed (unsafe to repeat) booking
+          + cannot be made. `start` must carry a time zone. Tools return 
+          +the appointment without the phone.                            
+      556 +- **Per tool**, all atomic (never cut off, state saved before 
+          +and after):                                                   
+      557 +  - `book_appointment`: idempotent, default retry (503 and tim
+          +eout, 2 retries, same key). Verify looks for a booked appointm
+          +ent at that doctor and start in the patient's own list. Not th
+          +ere means `Failed`, a failing verify means `Unknown`.         
+      558 +  - `reschedule_appointment`, `cancel_appointment`: not idempo
+          +tent, so never run twice, straight to verify. Reschedule is `D
+          +one` if the appointment is booked at the new start, else `Fail
+          +ed`. Cancel is `Done` if cancelled, `Failed("still booked")` i
+          +f not. An appointment missing from the patient's list is `Unkn
+          +own`.                                                         
+      559 +  - `create_payment_link`: retry on 503 only (the mock never s
+          +aves before that 503, 0.1). A timeout is not retried and has n
+          +o verify, so it ends `Unknown` (handoff) and `links[bill] = in
+          +_doubt`; a later request for that bill raises `Unknown` again 
+          +without calling the hospital. Success is stored as `links[bill
+          +] = {url}` and a second request returns it without a call. The
+          + record is `ctx.data["links"]`, a dict the service owns. **Wir
+          +ing open (commit 3/4):** the service must load it from `state[
+          +"links"]` and save it after every turn, failed ones too, like 
+          +`facts`. Without it the tool refuses (`Failed`), so a missing 
+          +record can never create a link.                               
+      560 +- **Tests run against the real mock app** (via `httpx.ASGITran
+          +sport`, behind a recorder) with the mock's chaos functions rep
+          +laced by scripts, so the idempotency lookup, 409 and `not_acti
+          +ve` behaviour are the mock's own, not a copy. Each named case 
+          +asserts the request count and the real state in the mock, not 
+          +only the result. Booking "saved then 503" needs the retries to
+          + be turned away *before* the key lookup (script `before=[False
+          +, True, True]`) to make verify the only way to know; the easy 
+          +variant, where the retry gets the booking back through the key
+          +, is a separate test.                                         
+      561 +- `HospitalClient` got `post` next to `get`; both go through o
+          +ne `_send`, so the error mapping (503 retryable, timeout unkno
+          +wn, 4xx failed) is the same.                                  
+  ⎿  Updated tests\test_write_tools.py +2 -1
+       4  """
+       5 
+       6  import asyncio
+       7 +import json                                                    
+       8 
+       9  import httpx
+      10  import pytest
+     ...
+      103      script(monkeypatch, before=[True])
+      104      rig = Rig()
+      105      assert isinstance(rig.run("book_appointment", BOOK), Done)
+      105 -    keys = [__import__("json").loads(body)["idempotency_key"] 
+          -for _, _, body in rig.wire.posts("/appointments")]            
+      106 +    keys = [json.loads(body)["idempotency_key"] for _, _, body
+          + in rig.wire.posts("/appointments")]                          
+      107      assert keys == ["key-1", "key-1"]
+      108      assert len(booked_at()) == 1
+      109 
+
+● Commit 1 is pushed as d127e15: 344 tests passed with no key, run without a
+  pipe. Commit 2 is built and waiting for your ok. pytest gives 363 passed with
+  no key, also without a pipe, and there's no key in the diff.
+
+  What changed
+  - HospitalClient has a post next to get. Both go through one _send, so a 503
+    is retryable, a timeout is unknown and a 4xx is a definite failure, for
+    writes as well as reads.
+  - agent_service/write_tools.py is new and holds the four write tools:
+    book_appointment, reschedule_appointment, cancel_appointment,
+    create_payment_link. All are atomic.
+    - Inputs: none has a phone or key field, and booking needs a time zone. The
+      phone and key come from ctx.data. book refuses to run without a key, so an
+      unkeyed booking is impossible.
+    - Book: retried with the same key. Verify then looks in the patient's own
+      list.
+    - Reschedule and cancel: never run twice. They go straight to verify.
+    - Payment link: retried on 503 only. A timeout ends Unknown and marks the
+      bill "in doubt". A second request for that bill raises Unknown again
+      without calling the hospital. A success is cached, and a repeat request
+      returns the cached link without a call.
+  - No agent has these tools. Neither agents.py nor service.py imports the
+    module, and a test checks both the imports and every agent's tool list. No
+    commit exists where a model can write without the gate.
+  - Tests: tests/test_write_tools.py runs against the real mock app through
+    httpx.ASGITransport, with the mock's chaos functions replaced by scripts.
+    - All eight of your named cases are in. Each asserts the request count and
+      the real state in the mock, not just the result.
+    - Booking "saved then 503" needs the retries turned away before the key
+      lookup, so that verify is the only way to know what happened. The easier
+      variant, where the retry gets the booking back through the key, is a
+      separate test.
+    - Extra tests: cancel saved then 503, book refuses without a key, the link
+      refuses without a record, the model can't supply a phone, key or zone-less
+      time, and the booking result carries no phone.
+  - docs/design-log.md has a new entry 3.3.
+
+  For commit 3: the payment-link cache is ctx.data["links"], a dict the service
+  owns. It has to load it from state["links"] and save it after every turn,
+  failed turns included (like facts). Until then the tool refuses without it, so
+  a missing record can never create a link. This is logged in 3.3.
+
+  Proposed message: Add the four write tools with verify, given to no agent. The
+  body says each tool's retry and verify rules, and that the gate comes before
+  any agent gets them.
+
+  Say ok and I'll commit and push. Then I'll start commit 3: the pause, the code
+  read-back, the strict-yes vocabulary test, and code running the stored
+  action. The emergency_suspected router flag stays planned for commit 4, with
+  the prompt changes.
+
+✻ Baked for 3m 11s · done 11:27 PM
+
+❯ ok, commit and push commit 2, then start commit 3.                            
+                                                                                
+  tests i want by name in commit 3:                                             
+  - a write with no pending action pauses, nothing is written, and the          
+    reply is the code read-back (doctor, day, date, time, or bill and           
+    amount)                                                                     
+  - a clear yes makes code run the stored params: exactly one write, and        
+    the reply says booked only when the result is done                          
+  - a table of yes phrases that pass and fail in english, hindi and             
+    hinglish, including "yes please book it" (pass), "yes but make it           
+    6pm", "yes?", "haan nahi" and a bare number (all fail)                      
+  - a non-yes reply clears the pending action and nothing is written            
+  - yes with nothing pending writes nothing                                     
+  - yes sent twice writes once                                                  
+  - the model calls the tool again with different params: a new                 
+    read-back, nothing written                                                  
+  - an unknown result gives the handoff reply and never says booked             
+  - a 409 result says it was not booked                                         
+  - an emergency message while something is pending clears it and writes        
+    nothing                                                                     
+  - the payment-link cache is loaded and saved every turn, failed turns         
+    included                                                                    
+
+  Ran 1 shell command (ctrl+o to expand)
+
+● Commit 2 is pushed as 747f7c8. Before I build commit 3, I want to check the
+  test rig and the fake client.
+
+  Ran 1 shell command (ctrl+o to expand)
+
+● I'm building commit 3 next: model calls to write tools will only propose
+  actions, code will execute a confirmed action without the model, and the same
+  check reruns before execution. The default agents still won't get write tools
+  until commit 4. · summary
+
+● Write(agent_service\confirm.py)
+  ⎿  Wrote 176 lines to agent_service\confirm.py
+       1 """What the patient reads before and after a write, and what cou
+         nts as "yes". All in code, no model.
+       2 
+       3 The read-back is built from the stored pending action, so the pa
+         tient confirms exactly what will run.
+       4 The reply after a write is built from the real result: "booked"
+         only on Done (design-log 3.2).
+       5 """
+       6 
+       7 from __future__ import annotations
+     … +169 lines (ctrl+o to expand)
+
+● Write(agent_service\gate.py)
+  ⎿  Wrote 124 lines to agent_service\gate.py
+       1 """The confirmation gate: no write runs on the model's say-so.
+       2 
+       3 A write tool called by the model never runs. The `before_tool` h
+         ook checks it against the hospital's
+       4 own records (fetched here, in this turn), builds the read-back t
+         ext from them, stores a pending action
+       5 and pauses. Only a strict yes on the next message makes the serv
+         ice run the stored action, after the
+       6 same check runs again (design-log 3.2, 3.4).
+       7 
+     … +117 lines (ctrl+o to expand)
+
+  Read 1 file, ran 1 shell command · 1 failed (ctrl+o to expand)
+
+● Same shell quoting trouble as before, so I'll put the patch script in a file
+  and run that.
+
+● Write(tools\_patch_commit3.py)
+  ⎿  Wrote 137 lines to tools\_patch_commit3.py
+       1 import pathlib
+       2 
+       3 root = pathlib.Path(__file__).resolve().parent.parent
+       4 
+       5 
+       6 def sub(path, old, new, count=1):
+       7     p = root / path
+       8     s = p.read_text(encoding="utf-8")
+       9     assert old in s, (path, old[:60])
+      10     p.write_text(s.replace(old, new, count), encoding="utf-8")
+     … +127 lines (ctrl+o to expand)
+
+● Bash(python tools/_patch_commit3.py && rm tools/_patch_commit3.py && unset
+      ANTHROPIC_API_KEY && uv run pytest -q -x 2>&1 | tail -15)
+  ⎿  patched
+             for spec in agents.values():
+                 assert not set(spec.tools.names()) & set(WRITE_TOOL_NAMES)
+     … +17 lines (ctrl+o to expand)
+  ⎿  Updated agent_service\agents.py +59 -46
+       1 -"""The specialist agents. Each is a fixed model, a fixed prompt
+         - and a fixed set of tools.                                     
+       2 -                                                               
+       3 -`human` has no model: the router picking it ends in `prompts.hu
+         -man_reply`. All specialists run on                             
+       4 -haiku for now; the haiku vs sonnet comparison happens at the en
+         -d of Phase 2 with real prompts (2.1).                          
+       5 -"""                                                            
+       6 -                                                               
+       7 -from __future__ import annotations                             
+       8 -                                                               
+       9 -from agent_service import prompts                              
+      10 -from agentcore import ToolRegistry                             
+      11 -from agentcore.loop import AgentSpec                           
+      12 -                                                               
+      13 -SPECIALIST_MODEL = "claude-haiku-5-5"                          
+      14 -SPECIALIST_MAX_TOKENS = 4096  # thinking counts inside it (1.3)
+         -; a ceiling, not a target                                      
+      15 -SPECIALIST_EFFORT = "low"                                      
+      16 -                                                               
+      17 -TOOLS = {                                                      
+      18 -    "info": [],                                                
+      19 -    "booking": ["find_doctors", "free_slots", "list_appointment
+         -s"],                                                           
+      20 -    "billing": ["list_bills"],                                 
+      21 -}                                                              
+      22 -                                                               
+      23 -                                                               
+      24 -def _subset(reg: ToolRegistry, names: list[str]) -> ToolRegistr
+         -y:                                                             
+      25 -    sub = ToolRegistry()                                       
+      26 -    for name in names:  # a fixed order, so the tool list is by
+         -te-identical every call and caches                             
+      27 -        tool = reg.get(name)                                   
+      28 -        if tool is None:                                       
+      29 -            raise KeyError(f"tool {name!r} is not registered") 
+      30 -        sub.register(tool)                                     
+      31 -    return sub                                                 
+      32 -                                                               
+      33 -                                                               
+      34 -def build_agents(read_tools: ToolRegistry) -> dict[str, AgentSp
+         -ec]:                                                           
+      35 -    systems = {"info": prompts.INFO, "booking": prompts.BOOKING
+         -, "billing": prompts.BILLING}                                  
+      36 -    return {                                                   
+      37 -        name: AgentSpec(                                       
+      38 -            name=name,                                         
+      39 -            model=SPECIALIST_MODEL,                            
+      40 -            system=systems[name],                              
+     … +65 lines (ctrl+o to expand)
+  ⎿  Deleted tools\_patch_commit3.py -137
+        1 -import pathlib                                                
+        2 -                                                              
+        3 -root = pathlib.Path(__file__).resolve().parent.parent         
+        4 -                                                              
+        5 -                                                              
+        6 -def sub(path, old, new, count=1):                             
+        7 -    p = root / path                                           
+        8 -    s = p.read_text(encoding="utf-8")                         
+        9 -    assert old in s, (path, old[:60])                         
+       10 -    p.write_text(s.replace(old, new, count), encoding="utf-8")
+       11 -                                                              
+       12 -                                                              
+       13 -A = "agent_service/agents.py"                                 
+       14 -sub(A, "\n\ndef _subset(", '''                                
+       15 -# Only given to an agent when the caller passes a write regist
+          -ry. The default wiring does not (commit 4                     
+       16 -# adds them together with the 4-hour rule and the prompts). Ev
+          -en then a write tool never runs on the                        
+       17 -# model's call: the gate in `gate.py` turns it into a pending 
+          -action (design-log 3.2).                                      
+       18 -WRITE_TOOLS = {                                               
+       19 -    "booking": ["book_appointment", "reschedule_appointment", 
+          -"cancel_appointment"],                                        
+       20 -    "billing": ["create_payment_link"],                       
+       21 -}                                                             
+       22 -                                                              
+       23 -                                                              
+       24 -def _subset(''')                                              
+       25 -sub(A, "def build_agents(read_tools: ToolRegistry) -> dict[str
+          -, AgentSpec]:\n", '''def build_agents(read_tools: ToolRegistry
+          -, write_tools: ToolRegistry | None = None) -> dict[str, AgentS
+          -pec]:                                                         
+       26 -    pool = ToolRegistry()                                     
+       27 -    for source in (read_tools, write_tools):                  
+       28 -        for name in source.names() if source else []:         
+       29 -            pool.register(source.get(name))                   
+       30 -    names = {k: TOOLS[k] + (WRITE_TOOLS.get(k, []) if write_to
+          -ols else []) for k in TOOLS}                                  
+       31 -''')                                                          
+       32 -sub(A, "tools=_subset(read_tools, TOOLS[name]),", "tools=_subs
+          -et(pool, names[name]),")                                      
+       33 -                                                              
+       34 -S = "agent_service/service.py"                                
+       35 -sub(S, "from agent_service import emergency\n", "from agent_se
+          -rvice import confirm, emergency\n")                           
+       36 -sub(S, "from agent_service.hospital import HospitalClient\n", 
+          -"from agent_service.gate import Checked, Gate\nfrom agent_serv
+          -ice.hospital import HospitalClient\n")                        
+       37 -sub(S, "from agent_service.tools import read_tools\nfrom agent
+          -core import RuntimeConfig\n",                                 
+       38 -    "from agent_service.tools import read_tools\nfrom agent_se
+          -rvice.write_tools import write_tools\nfrom agentcore import Do
+          -ne, Failed, HookRunner, RuntimeConfig, ToolContext, Unknown\n"
+          -)                                                             
+       39 -sub(S, "        self.loop = AgentLoop(client, store, traces, c
+          -onfig=self.config, sleep=sleep, rng=rng)\n        self._sleep,
+          - self._rng = sleep, rng\n",                                   
+       40 -    '''        self.writes = write_tools(hospital)  # not give
+          -n to any agent unless the caller builds agents with them      
+     … +97 lines (ctrl+o to expand)
+  ⎿  … +1 file changed
+     agent_service\service.py
+
+● That test's import check is now out of date, since the service imports the
+  write tools on purpose. What matters is that the default agents have none, so
+  I'll change the test to check that.
+
+  Searched for 1 pattern (ctrl+o to expand)
+
+● Bash(python - <<'PYEOF'
+      p='tests/test_write_tools.py'…)
+  ⎿  ......................................................................
+     .. [ 79%]
+     ......................................................................
+     … +4 lines (ctrl+o to expand)
+  ⎿  1 file changed (binary, mode only or too large to show)
+     tests\test_write_tools.py
+
+● Now the commit 3 tests, with your names.
+
+● Write(tests\test_confirm.py)
+  ⎿  Wrote 402 lines to tests\test_confirm.py
+       1 """The confirmation gate end to end: service + gate + write tool
+         s + the REAL mock hospital app.
+       2 
+       3 The model is scripted. A "yes" never reaches a model: where a te
+         st says so, it checks the call count.
+       4 """
+       5 
+       6 import asyncio
+       7 import json
+       8 
+     … +394 lines (ctrl+o to expand)
+
+  Ran 1 shell command (ctrl+o to expand)
+
+● All three failures were bugs in my tests, and one showed that the mock also
+  rolls chaos dice on reads. So the planned 503 needs to be aimed at the write,
+  not the read. · summary
+
+● Bash(python - <<'PYEOF'
+      p='tests/test_confirm.py'…)
+  ⎿  ......................................................................
+     .. [ 96%]
+     ...
+     … +2 lines (ctrl+o to expand)
+  ⎿  1 file changed (binary, mode only or too large to show)
+     tests\test_confirm.py
+
+● All 75 pass. Before I trust them, a quick mutation check: if I turn the gate
+  off, do the tests fail?
+
+  Ran 1 shell command (ctrl+o to expand)
+
+● Both mutations are caught, and the files are restored. Now the docs and the
+  full run.
+
+● Bash(cat >> docs/design-log.md <<'EOF'…)
+  ⎿  ============================= test session starts ====================
+     =========
+     platform win32 -- Python 3.11.5, pytest-9.2.0, pluggy-1.7.0
+     … +29 lines (ctrl+o to expand)
+  ⎿  Updated docs\design-log.md +13
+      559    - `create_payment_link`: retry on 503 only (the mock never s
+           aves before that 503, 0.1). A timeout is not retried and has n
+           o verify, so it ends `Unknown` (handoff) and `links[bill] = in
+           _doubt`; a later request for that bill raises `Unknown` again
+           without calling the hospital. Success is stored as `links[bill
+           ] = {url}` and a second request returns it without a call. The
+            record is `ctx.data["links"]`, a dict the service owns. **Wir
+           ing open (commit 3/4):** the service must load it from `state[
+           "links"]` and save it after every turn, failed ones too, like
+           `facts`. Without it the tool refuses (`Failed`), so a missing
+           record can never create a link.
+      560  - **Tests run against the real mock app** (via `httpx.ASGITran
+           sport`, behind a recorder) with the mock's chaos functions rep
+           laced by scripts, so the idempotency lookup, 409 and `not_acti
+           ve` behaviour are the mock's own, not a copy. Each named case
+           asserts the request count and the real state in the mock, not
+           only the result. Booking "saved then 503" needs the retries to
+            be turned away *before* the key lookup (script `before=[False
+           , True, True]`) to make verify the only way to know; the easy
+           variant, where the retry gets the booking back through the key
+           , is a separate test.
+      561  - `HospitalClient` got `post` next to `get`; both go through o
+           ne `_send`, so the error mapping (503 retryable, timeout unkno
+           wn, 4xx failed) is the same.
+      562 +                                                              
+      563 +### 3.4 Confirmation (commit 3): pause, code read-back, strict
+          + yes, code runs the stored action                             
+      564 +- **A write tool called by the model never runs.** The `before
+          +_tool` hook (`gate.py`) fetches what the write touches from th
+          +e hospital, in that turn, and builds `pending = {tool, params,
+          + key (fresh uuid), agent, language, display, readback}`. It re
+          +turns `Pause`, so the loop ends the turn as `paused` and store
+          +s `pending` together with the history. The reply is `pending["
+          +readback"]`, built by code from the records (doctor name, week
+          +day, date, time, or bill description and amount). The model's 
+          +own closing words are thrown away, and the stored history gets
+          + the read-back in their place (a `history_transform` closure),
+          + so the next turn sees what the patient saw. Cost: one model c
+          +all after the pause whose text is discarded (accepted in 3.2).
+      565 +- **A pending action lives for one turn.** The service pops it
+          + before the router on the next message and saves, whatever the
+          + message is. A strict yes runs it. Anything else leaves it gon
+          +e, and the agent proposes again if the patient still wants it.
+          + So a stray "ok" an hour later finds nothing, and "yes" sent t
+          +wice cannot write twice (the second finds no pending action). 
+          +The emergency check runs before this and also clears it.      
+      566 +- **A strict yes runs in code** (`ChatService._confirmed`): th
+          +e stored params are validated again, `gate.check` runs again, 
+          +and if the fresh records differ from the stored `display` (the
+          + appointment moved, a bill was paid) nothing runs and the pati
+          +ent is told something changed. Otherwise `executor.execute` ru
+          +ns the stored action with the stored key, under the same atomi
+          +c rules as any tool. No model call is made on a yes (a test co
+          +unts them). Outcomes are marked told, because the code's reply
+          + tells the patient.                                           
+      567 +- **The reply comes from the real result.** Done: the text is 
+          +filled from the hospital's own answer (the time it says it boo
+          +ked, the link it made). Failed with `slot_taken`: "was not boo
+          +ked" / "was not moved". Other Failed: "not done, nothing was c
+          +hanged". Unknown: a fixed text that says it could not confirm,
+          + tells the patient not to try again, and hands off (`handoff=t
+          +rue`). None of these texts can say "booked" unless the result 
+          +was Done. English, Hinglish and Hindi for each (the earlier cu
+          +t-list item 3 is not taken).                                  
+      568 +- **Yes vocabulary** (`confirm.is_yes`): every word must be in
+          + an agreeing vocabulary and one must be a yes word; any other 
+          +word, any digit, any "?" fails. Same normaliser as the emergen
+          +cy check. Words that name an action ("book", "cancel") only co
+          +unt for the pending action's own tool, so "yes cancel it" is n
+          +ot a yes to a booking. A table of 25 passing and 24 failing ph
+          +rases is in `test_confirm.py` ("yes please book it" passes; "y
+          +es but make it 6pm", "yes?", "haan nahi", "5" fail). Not a yes
+          + by design: a bare 👍, "book it" (no yes word), "yes, 98765432
+          +10".                                                          
+      569 +- **Ownership comes with the read-back** because the read-back
+          + needs the record. For cancel, reschedule and payment link the
+          + id must be in the patient's own appointments or bills, fetche
+          +d in that turn; the refusal text is the same for someone else'
+          +s id and a missing one and never repeats an id, doctor, time o
+          +r name (a parametrized test compares the two texts and searche
+          +s them for the other patient's data). An own but inactive appo
+          +intment or paid bill gets its own message, since it is the pat
+          +ient's own record. A failed lookup refuses and proposes nothin
+          +g (fails closed). What is **not** done yet: the 4-hour rule, a
+          +nd `handoff` on a refusal (commit 4).                         
+      570 +- **The hospital's reads roll the chaos dice too** (found by a
+          + test aimed at the write that hit the gate's read instead). Th
+          +e gate retries a read twice with the shared backoff helper; th
+          +e write itself is untouched.                                  
+      571 +- **Payment link record is now wired:** `data["links"]` is loa
+          +ded from `state["links"]` every turn and saved by `_save` afte
+          +r it, failed turns included (tested with a tool that writes an
+          +d then a turn that fails). A link in doubt survives to the nex
+          +t request: a second "send it again" calls the hospital zero ti
+          +mes and hands off.                                            
+      572 +- **Still not given to any agent by default.** `build_agents(r
+          +ead, write)` takes an optional write registry; the default doe
+          +s not pass one. Tests pass it. Commit 4 turns it on with the 4
+          +-hour rule, `contact_staff`, two strikes, `emergency_suspected
+          +` and the new prompts.                                        
+      573 +- **Mutation check done by hand:** with the gate turned off 19
+          + of the new tests fail; with the yes rule loosened (no yes wor
+          +d needed) the table fails.                                    
+      574 +- **Known limit:** the read-back covers what we can check. A b
+          +ooking read-back does not confirm the slot is free (cut-list i
+          +tem 2): the mock answers 409 and the patient is told it was no
+          +t booked.                                                     
+  ⎿  Updated docs\flow.md +24
+      207  ```
+      208 
+      209  `GET /trace/{session_id}`: every event of the session (router
+           and specialist share one trace id per turn) and the totals ove
+           r all turns. Traces are filed under the request's session id,
+           state under the hashed key, so one session id used by two phon
+           es is two conversations with one shared trace list.
+      210 +                                                              
+      211 +## Phase 3: a write (commit 3)                                
+      212 +                                                              
+      213 +```mermaid                                                    
+      214 +flowchart TD                                                  
+      215 +    M[Message] --> E{emergency?}                              
+      216 +    E -- yes --> EX[Fixed reply, clear pending, emergency + ha
+          +ndoff]                                                        
+      217 +    E -- no --> P{pending action?}                            
+      218 +    P -- yes --> SP[Spend it: pop and save]                   
+      219 +    SP --> Y{strict yes?}                                     
+      220 +    Y -- yes --> C[Check again against the hospital's records]
+      221 +    C -- changed --> CH[Reply: something changed, nothing ran]
+      222 +    C -- same --> X[Executor runs the STORED action with the S
+          +TORED key]                                                    
+      223 +    X --> R{result}                                           
+      224 +    R -- Done --> D[Reply from the real result: booked / cance
+          +lled / link]                                                  
+      225 +    R -- Failed --> F[Reply: not done, nothing changed / slot 
+          +taken]                                                        
+      226 +    R -- Unknown --> U[Reply: could not confirm, don't retry. 
+          +handoff]                                                      
+      227 +    Y -- no --> RT[Router, agent as usual]                    
+      228 +    P -- no --> RT                                            
+      229 +    RT --> W{model calls a write tool}                        
+      230 +    W --> G[Gate hook: fetch records, own id? refuse, same wor
+          +ds for foreign and missing]                                   
+      231 +    G -- ok --> PA[Pause: store pending, reply = code read-bac
+          +k]                                                            
+      232 +    G -- refused --> B[Block: the model is told, nothing store
+          +d]                                                            
+      233 +```                                                           
+
+● Commit 3 is ready and waiting for your ok. pytest gives 438 passed with no 
+  key, run unpiped (up from 363), and there's no key in the diff. Before
+  trusting the tests I turned the gate off by hand and 19 of the new tests
+  failed. I also loosened the yes rule and the phrase table failed. Both changes
+  are reverted.
+
+  What changed
+  - gate.py: a write tool called by the model never runs.
+    - The hook fetches the hospital's records in that turn and builds the
+      pending action {tool, params, fresh key, display, readback}.
+    - It then pauses. The reply is the code's read-back: doctor, weekday, date
+      and time, or bill and amount.
+    - The model's closing words are discarded, and the stored history gets the
+      read-back instead.
+  - confirm.py: the yes vocabulary and the reply texts in English, Hinglish and
+    Hindi.
+    - Yes test: every word must be in the agreeing vocabulary and at least one
+      must be a yes word. Any other word, number or ? fails.
+    - Action words: words like "book" or "cancel" only count for the pending
+      action's own tool, so "yes cancel it" is not a yes to a booking.
+    - Replies: they are filled from the real result. "Booked" only appears on
+      Done. A 409 says "was not booked". Unknown says it couldn't confirm, tells
+      the patient not to retry, and hands off.
+  - service.py:
+    - A pending action is spent on the next message, whatever that message is. A
+      strict yes runs the stored action in code, after re-checking the records
+      against what was read back. If they changed, nothing runs.
+    - There is no model call on a yes (a test counts the calls).
+    - The payment-link record is loaded and saved every turn, failed turns
+      included.
+  - Ids: a blocked id gets the same text whether it's someone else's or doesn't
+    exist, and it never repeats an id, doctor, time or name. A parametrized test
+    compares the two texts and searches them for the other patient's data.
+  - Tests: every named test you listed is in tests/test_confirm.py, and the
+    table has 25 passing and 24 failing yes phrases. They run against the real
+    mock app, and the extras cover a changed record, a made-up doctor, a failed
+    lookup, and hospital reads that fail.
+
+  Things you should know
+  - Default agents still have no write tools. build_agents(read, write) takes an
+    optional write registry. Only the tests pass one. Commit 4 turns it on
+    together with the 4-hour rule, contact_staff, strikes, emergency_suspected
+    and the prompts. I changed the old commit-2 test from "service doesn't
+    import write tools" to "default agents have none", because the service now
+    imports them to run confirmed actions.
+  - Ownership is already in, but the 4-hour rule is not. The read-back needs the
+    record, so the own-id check came with it. Reschedule and cancel stay
+    unwired until commit 4 for that reason.
+  - The mock's reads also roll the chaos dice. A test I aimed at the write hit
+    the gate's read instead. The gate retries reads twice. This also affects how
+    I script chaos in the later eval runs.
+  - A pending action lives for one turn. "Make it 6pm" after a read-back clears
+    it and the agent proposes again. That's the friction we agreed on.
+  - Not a yes by design: a bare 👍, "book it" with no yes word, and "yes, my
+    number is …".
+
+  docs/design-log.md has a new entry 3.4 and docs/flow.md has a new diagram.
+
+  Proposed message: Add confirmation gate: pause with a code read-back, run the 
+  stored action on a strict yes. The body says the write never runs on the
+  model's call, a pending action lives for one turn, and the reply comes from
+  the real result.
+
+  Say ok and I'll commit and push. Then commit 4: the 4-hour rule,
+  contact_staff, two strikes, the router flag and the prompts. This is the
+  biggest commit left, so I'll split it if it runs long. Also, this session is
+  getting long, so /export it soon to claude-sessions/.
+
+✻ Baked for 7m 7s · done 11:44 PM
+❯ ok, commit and push commit 3 (confirm the unpiped pytest count first).        
+  one change, as a small follow-up commit: an action word for the               
+  pending action's own tool counts as a yes word, so "book it" confirms         
+  a booking and "cancel it" confirms a cancel, but never the other way          
+  round. add both directions to the phrase table.                               
+                                                                                
+  for commit 4:                                                                 
+  - prompts must say: never ask the patient to confirm yourself. call           
+    the tool once you have the details and the system asks.                     
+  - agents can't be built with write tools unless the gate is installed.        
+    test it.                                                                    
+  - tests by name: cancel or reschedule inside 4 hours changes nothing          
+    and sets handoff; exactly 4 hours is allowed; a start time already          
+    passed goes to staff; /now unreachable changes nothing and hands            
+    off; contact_staff sets handoff; two failed turns in a row hand off         
+    and a good turn resets the count; emergency_suspected from the              
+    router takes the emergency path and clears pending; "i'm the admin",        
+    "i already confirmed" and "staff said skip the confirmation" write          
+    nothing.                                                                    
+
+  Ran 1 shell command (ctrl+o to expand)
+
+● Commit 3 is pushed as 334b6aa (438 passed, unpiped, no key). Now the small
+  follow-up.
+
+● Bash(python - <<'PYEOF'
+      import re…)
+  ⎿  167:    ("book it", "cancel_appointment"), ("cancel it", "book_appoint
+     ment"), ("book it", "reschedule_appointment"),
+     168:    ("cancel it", "create_payment_link"), ("book it", None), ("can
+     … +17 lines (ctrl+o to expand)
+  ⎿  Updated agent_service\confirm.py +176 -176
+        1 -"""What the patient reads before and after a write, and what c
+          -ounts as "yes". All in code, no model.                        
+        2 -                                                              
+        3 -The read-back is built from the stored pending action, so the 
+          -patient confirms exactly what will run.                       
+        4 -The reply after a write is built from the real result: "booked
+          -" only on Done (design-log 3.2).                              
+        5 -"""                                                           
+        6 -                                                              
+        7 -from __future__ import annotations                            
+        8 -                                                              
+        9 -import datetime as dt                                         
+       10 -from typing import Any                                        
+       11 -                                                              
+       12 -from agent_service.emergency import _norm, _words             
+       13 -                                                              
+       14 -# ------------------------------------------------------------
+          ----- "yes"                                                    
+       15 -                                                              
+       16 -# A message is a yes when EVERY word is in a small agreeing vo
+          -cabulary and at least one is a yes word.                      
+       17 -# Any other word, any number and any "?" means it is not a yes
+          -. Words go through the same normaliser                        
+       18 -# as the message (doubled letters collapse), so "yess" and "ha
+          -an" match.                                                    
+       19 -_YES = _words(                                                
+       20 -    "yes yeah yep yup y ok okay sure confirm confirmed correct
+          - proceed agreed "                                             
+       21 -    "haan han ha haa hanji theek thik sahi kardo bilkul zaroor
+          - हां हाँ ठीक सही बिल्कुल जरूर ज़रूर"                                 
+       22 -)                                                             
+       23 -_AGREE = _words(                                              
+       24 -    "please pls plz go ahead do it this that the thanks thank 
+          -you ji hai hain kar karo de dena den dein dijiye kijiye "     
+       25 -    "bhej bhejo now fine good of course absolutely definitely 
+          -and "                                                         
+       26 -    "जी है हैं कर करो दो दीजिए कीजिए दें प्लीज धन्यवाद शुक्रिया"       
+       27 -)                                                             
+       28 -# Words that name the action are agreeing only when they name 
+          -THE pending action: "yes cancel it" is not                    
+       29 -# a yes to a booking.                                         
+       30 -_ACTION = {                                                   
+       31 -    "book_appointment": _words("book booking booked बुक"),     
+       32 -    "reschedule_appointment": _words("reschedule move change s
+          -hift रीशेड्यूल"),                                                
+       33 -    "cancel_appointment": _words("cancel cancelled कैंसल रद्द"), 
+       34 -    "create_payment_link": _words("send link payment pay लिंक भे
+          -ज"),                                                          
+       35 -}                                                             
+       36 -                                                              
+       37 -                                                              
+       38 -def is_yes(message: str, tool: str | None = None) -> bool:    
+       39 -    if "?" in message or "？" in message or "؟" in message:   
+       40 -        return False                                          
+     … +312 lines (ctrl+o to expand)
+  ⎿  Updated docs\design-log.md +23 -23
+      549  - **A blocked id says one thing.** Someone else's id and an id
+            that does not exist get the same reason, and it never repeats
+            a doctor, time or name.
+      550  - **Payment link after a timeout:** `Unknown`, handoff.
+      551  - **One extra model call after a pause or a code-set handoff**
+            is accepted (about $0.001 per write); its text is discarded.
+      552 -                                                              
+      553 -### 3.3 The four write tools (commit 2): built, tested, given 
+          -to no agent                                                   
+      554 -- **No agent has them.** `agents.py` and `service.py` do not i
+          -mport `write_tools.py`, and a test checks both that and the ag
+          -ents' tool lists. No commit may exist where a model can write 
+          -without the confirmation gate (user's rule). They are wired in
+          - only through code that has run the gate (commit 3).          
+      555 -- **Inputs have no phone and no key.** The phone is `ctx.data[
+          -"phone"]`, the booking key is `ctx.data["idempotency_key"]`, b
+          -oth put there by code from the pending action. `book` refuses 
+          -to run without a key, so an unkeyed (unsafe to repeat) booking
+          - cannot be made. `start` must carry a time zone. Tools return 
+          -the appointment without the phone.                            
+      556 -- **Per tool**, all atomic (never cut off, state saved before 
+          -and after):                                                   
+      557 -  - `book_appointment`: idempotent, default retry (503 and tim
+          -eout, 2 retries, same key). Verify looks for a booked appointm
+          -ent at that doctor and start in the patient's own list. Not th
+          -ere means `Failed`, a failing verify means `Unknown`.         
+      558 -  - `reschedule_appointment`, `cancel_appointment`: not idempo
+          -tent, so never run twice, straight to verify. Reschedule is `D
+          -one` if the appointment is booked at the new start, else `Fail
+          -ed`. Cancel is `Done` if cancelled, `Failed("still booked")` i
+          -f not. An appointment missing from the patient's list is `Unkn
+          -own`.                                                         
+      559 -  - `create_payment_link`: retry on 503 only (the mock never s
+          -aves before that 503, 0.1). A timeout is not retried and has n
+          -o verify, so it ends `Unknown` (handoff) and `links[bill] = in
+          -_doubt`; a later request for that bill raises `Unknown` again 
+          -without calling the hospital. Success is stored as `links[bill
+          -] = {url}` and a second request returns it without a call. The
+          - record is `ctx.data["links"]`, a dict the service owns. **Wir
+          -ing open (commit 3/4):** the service must load it from `state[
+          -"links"]` and save it after every turn, failed ones too, like 
+          -`facts`. Without it the tool refuses (`Failed`), so a missing 
+          -record can never create a link.                               
+      560 -- **Tests run against the real mock app** (via `httpx.ASGITran
+          -sport`, behind a recorder) with the mock's chaos functions rep
+          -laced by scripts, so the idempotency lookup, 409 and `not_acti
+          -ve` behaviour are the mock's own, not a copy. Each named case 
+          -asserts the request count and the real state in the mock, not 
+          -only the result. Booking "saved then 503" needs the retries to
+          - be turned away *before* the key lookup (script `before=[False
+          -, True, True]`) to make verify the only way to know; the easy 
+          -variant, where the retry gets the booking back through the key
+          -, is a separate test.                                         
+      561 -- `HospitalClient` got `post` next to `get`; both go through o
+          -ne `_send`, so the error mapping (503 retryable, timeout unkno
+          -wn, 4xx failed) is the same.                                  
+      562 -                                                              
+      563 -### 3.4 Confirmation (commit 3): pause, code read-back, strict
+          - yes, code runs the stored action                             
+      564 -- **A write tool called by the model never runs.** The `before
+          -_tool` hook (`gate.py`) fetches what the write touches from th
+          -e hospital, in that turn, and builds `pending = {tool, params,
+          - key (fresh uuid), agent, language, display, readback}`. It re
+          -turns `Pause`, so the loop ends the turn as `paused` and store
+          -s `pending` together with the history. The reply is `pending["
+          -readback"]`, built by code from the records (doctor name, week
+          -day, date, time, or bill description and amount). The model's 
+          -own closing words are thrown away, and the stored history gets
+          - the read-back in their place (a `history_transform` closure),
+          - so the next turn sees what the patient saw. Cost: one model c
+          -all after the pause whose text is discarded (accepted in 3.2).
+      565 -- **A pending action lives for one turn.** The service pops it
+          - before the router on the next message and saves, whatever the
+          - message is. A strict yes runs it. Anything else leaves it gon
+          -e, and the agent proposes again if the patient still wants it.
+          - So a stray "ok" an hour later finds nothing, and "yes" sent t
+          -wice cannot write twice (the second finds no pending action). 
+          -The emergency check runs before this and also clears it.      
+      566 -- **A strict yes runs in code** (`ChatService._confirmed`): th
+          -e stored params are validated again, `gate.check` runs again, 
+          -and if the fresh records differ from the stored `display` (the
+          - appointment moved, a bill was paid) nothing runs and the pati
+          -ent is told something changed. Otherwise `executor.execute` ru
+          -ns the stored action with the stored key, under the same atomi
+          -c rules as any tool. No model call is made on a yes (a test co
+          -unts them). Outcomes are marked told, because the code's reply
+          - tells the patient.                                           
+      567 -- **The reply comes from the real result.** Done: the text is 
+          -filled from the hospital's own answer (the time it says it boo
+          -ked, the link it made). Failed with `slot_taken`: "was not boo
+          -ked" / "was not moved". Other Failed: "not done, nothing was c
+          -hanged". Unknown: a fixed text that says it could not confirm,
+          - tells the patient not to try again, and hands off (`handoff=t
+          -rue`). None of these texts can say "booked" unless the result 
+          -was Done. English, Hinglish and Hindi for each (the earlier cu
+          -t-list item 3 is not taken).                                  
+      568 -- **Yes vocabulary** (`confirm.is_yes`): every word must be in
+          - an agreeing vocabulary and one must be a yes word; any other 
+          -word, any digit, any "?" fails. Same normaliser as the emergen
+          -cy check. Words that name an action ("book", "cancel") only co
+          -unt for the pending action's own tool, so "yes cancel it" is n
+          -ot a yes to a booking. A table of 25 passing and 24 failing ph
+          -rases is in `test_confirm.py` ("yes please book it" passes; "y
+          -es but make it 6pm", "yes?", "haan nahi", "5" fail). Not a yes
+          - by design: a bare 👍, "book it" (no yes word), "yes, 98765432
+          -10".                                                          
+      569 -- **Ownership comes with the read-back** because the read-back
+          - needs the record. For cancel, reschedule and payment link the
+          - id must be in the patient's own appointments or bills, fetche
+          -d in that turn; the refusal text is the same for someone else'
+          -s id and a missing one and never repeats an id, doctor, time o
+          -r name (a parametrized test compares the two texts and searche
+          -s them for the other patient's data). An own but inactive appo
+          -intment or paid bill gets its own message, since it is the pat
+          -ient's own record. A failed lookup refuses and proposes nothin
+          -g (fails closed). What is **not** done yet: the 4-hour rule, a
+          -nd `handoff` on a refusal (commit 4).                         
+      570 -- **The hospital's reads roll the chaos dice too** (found by a
+          - test aimed at the write that hit the gate's read instead). Th
+          -e gate retries a read twice with the shared backoff helper; th
+          -e write itself is untouched.                                  
+      571 -- **Payment link record is now wired:** `data["links"]` is loa
+          -ded from `state["links"]` every turn and saved by `_save` afte
+          -r it, failed turns included (tested with a tool that writes an
+          -d then a turn that fails). A link in doubt survives to the nex
+          -t request: a second "send it again" calls the hospital zero ti
+          -mes and hands off.                                            
+      572 -- **Still not given to any agent by default.** `build_agents(r
+          -ead, write)` takes an optional write registry; the default doe
+          -s not pass one. Tests pass it. Commit 4 turns it on with the 4
+          --hour rule, `contact_staff`, two strikes, `emergency_suspected
+          -` and the new prompts.                                        
+      573 -- **Mutation check done by hand:** with the gate turned off 19
+          - of the new tests fail; with the yes rule loosened (no yes wor
+          -d needed) the table fails.                                    
+      574 -- **Known limit:** the read-back covers what we can check. A b
+          -ooking read-back does not confirm the slot is free (cut-list i
+          -tem 2): the mock answers 409 and the patient is told it was no
+          -t booked.                                                     
+      552 +                                                              
+      553 +### 3.3 The four write tools (commit 2): built, tested, given 
+          +to no agent                                                   
+      554 +- **No agent has them.** `agents.py` and `service.py` do not i
+          +mport `write_tools.py`, and a test checks both that and the ag
+          +ents' tool lists. No commit may exist where a model can write 
+          +without the confirmation gate (user's rule). They are wired in
+          + only through code that has run the gate (commit 3).          
+      555 +- **Inputs have no phone and no key.** The phone is `ctx.data[
+          +"phone"]`, the booking key is `ctx.data["idempotency_key"]`, b
+          +oth put there by code from the pending action. `book` refuses 
+          +to run without a key, so an unkeyed (unsafe to repeat) booking
+          + cannot be made. `start` must carry a time zone. Tools return 
+          +the appointment without the phone.                            
+      556 +- **Per tool**, all atomic (never cut off, state saved before 
+          +and after):                                                   
+      557 +  - `book_appointment`: idempotent, default retry (503 and tim
+          +eout, 2 retries, same key). Verify looks for a booked appointm
+          +ent at that doctor and start in the patient's own list. Not th
+          +ere means `Failed`, a failing verify means `Unknown`.         
+      558 +  - `reschedule_appointment`, `cancel_appointment`: not idempo
+          +tent, so never run twice, straight to verify. Reschedule is `D
+          +one` if the appointment is booked at the new start, else `Fail
+          +ed`. Cancel is `Done` if cancelled, `Failed("still booked")` i
+          +f not. An appointment missing from the patient's list is `Unkn
+          +own`.                                                         
+      559 +  - `create_payment_link`: retry on 503 only (the mock never s
+          +aves before that 503, 0.1). A timeout is not retried and has n
+          +o verify, so it ends `Unknown` (handoff) and `links[bill] = in
+          +_doubt`; a later request for that bill raises `Unknown` again 
+          +without calling the hospital. Success is stored as `links[bill
+          +] = {url}` and a second request returns it without a call. The
+          + record is `ctx.data["links"]`, a dict the service owns. **Wir
+          +ing open (commit 3/4):** the service must load it from `state[
+          +"links"]` and save it after every turn, failed ones too, like 
+          +`facts`. Without it the tool refuses (`Failed`), so a missing 
+          +record can never create a link.                               
+      560 +- **Tests run against the real mock app** (via `httpx.ASGITran
+          +sport`, behind a recorder) with the mock's chaos functions rep
+          +laced by scripts, so the idempotency lookup, 409 and `not_acti
+          +ve` behaviour are the mock's own, not a copy. Each named case 
+          +asserts the request count and the real state in the mock, not 
+          +only the result. Booking "saved then 503" needs the retries to
+          + be turned away *before* the key lookup (script `before=[False
+          +, True, True]`) to make verify the only way to know; the easy 
+          +variant, where the retry gets the booking back through the key
+          +, is a separate test.                                         
+      561 +- `HospitalClient` got `post` next to `get`; both go through o
+          +ne `_send`, so the error mapping (503 retryable, timeout unkno
+          +wn, 4xx failed) is the same.                                  
+      562 +                                                              
+      563 +### 3.4 Confirmation (commit 3): pause, code read-back, strict
+          + yes, code runs the stored action                             
+      564 +- **A write tool called by the model never runs.** The `before
+          +_tool` hook (`gate.py`) fetches what the write touches from th
+          +e hospital, in that turn, and builds `pending = {tool, params,
+          + key (fresh uuid), agent, language, display, readback}`. It re
+          +turns `Pause`, so the loop ends the turn as `paused` and store
+          +s `pending` together with the history. The reply is `pending["
+          +readback"]`, built by code from the records (doctor name, week
+          +day, date, time, or bill description and amount). The model's 
+          +own closing words are thrown away, and the stored history gets
+          + the read-back in their place (a `history_transform` closure),
+          + so the next turn sees what the patient saw. Cost: one model c
+          +all after the pause whose text is discarded (accepted in 3.2).
+      565 +- **A pending action lives for one turn.** The service pops it
+          + before the router on the next message and saves, whatever the
+          + message is. A strict yes runs it. Anything else leaves it gon
+          +e, and the agent proposes again if the patient still wants it.
+          + So a stray "ok" an hour later finds nothing, and "yes" sent t
+          +wice cannot write twice (the second finds no pending action). 
+          +The emergency check runs before this and also clears it.      
+     … +9 lines (ctrl+o to expand)
+  ⎿  Updated tests\test_confirm.py +5 -1
+      162  ]
+      163  FAIL = [
+      164      ("yes but make it 6pm", None), ("yes?", None), ("haan nahi
+           ", None), ("5", None), ("yes 6", None), ("12", None),
+      165 -    ("no", None), ("nahi", None), ("नहीं", None), ("", None), (
+          -"   ", None), ("👍", None), ("please", None), ("book it", "boo
+          -k_appointment"),                                              
+      165 +    ("no", None), ("nahi", None), ("नहीं", None), ("", None), (
+          +"   ", None), ("👍", None), ("please", None),                 
+      166 +    # ...but never for another tool, and never with no pending
+          + action                                                       
+      167 +    ("book it", "cancel_appointment"), ("cancel it", "book_app
+          +ointment"), ("book it", "reschedule_appointment"),            
+      168 +    ("cancel it", "create_payment_link"), ("book it", None), (
+          +"cancel it", None), ("बुक कर दो", "cancel_appointment"),       
+      169 +    ("book it but at 6pm", "book_appointment"), ("book it?", "
+          +book_appointment"),                                           
+      170      ("yes cancel it", "book_appointment"),  # an action word f
+           or another action
+      171      ("yes please book it", "cancel_appointment"), ("yes but no
+           t tomorrow", None), ("haan lekin kal nahi", None),
+      172      ("ok what is the fee", None), ("ठीक है लेकिन कल नहीं", None),
+            ("hmm", None), ("yes and also cancel the other one", "book_ap
+           pointment"),
+
+● Only 8 new cases appeared, where I expected 16. I'll check that the PASS rows
+  actually landed.
+
+  Searched for 1 pattern (ctrl+o to expand)
+
+● The PASS rows didn't land because the anchor text didn't match. I'll add them
+  directly.
+
+● Update(tests\test_confirm.py)
+  ⎿  Added 4 lines
+      158      ("sure", None), ("confirm", None), ("yes please book it",
+           "book_appointment"), ("yes, cancel it", "cancel_appointment"),
+      159      ("yes send the link", "create_payment_link"), ("haan", Non
+           e), ("haan ji", None), ("ji haan", None), ("haan kar do", None
+           ),
+      160      ("theek hai", None), ("haan theek hai kar do", None), ("ha
+           an book kar do", "book_appointment"), ("bilkul",  None),
+      161 +    # the action word of the pending action's own tool is a ye
+          +s word                                                        
+      162 +    ("book it", "book_appointment"), ("please book it", "book_
+          +appointment"), ("cancel it", "cancel_appointment"),           
+      163 +    ("cancel kar do", "cancel_appointment"), ("change it", "re
+          +schedule_appointment"), ("send the link", "create_payment_link
+          +"),                                                           
+      164 +    ("बुक कर दो", "book_appointment"), ("कैंसल कर दो", "cancel_ap
+          +pointment"),                                                  
+      165      ("हाँ", None), ("हां", None), ("ठीक है", None), ("जी हां", Non
+           e), ("हां कर दो", None), ("हाँ बुक कर दो", "book_appointment"),
+      166  ]
+      167  FAIL = [
+
+  Ran 1 shell command (ctrl+o to expand)
+
+● The follow-up is ready and waiting for your ok. pytest gives 454 passed with 
+  no key (446 was my miscount: the first edit missed half the rows, which I
+  caught and fixed).
+
+  Change: an action word for the pending action's own tool now counts as a yes
+  word.
+  - "book it" confirms a booking, "cancel it" confirms a cancel, "change it" a
+    reschedule, "send the link" a payment link, and the Hindi बुक कर दो and कैंसल 
+    कर दो work too.
+  - It never works the other way round: "book it" with a cancel pending, "cancel
+    it" with a booking pending, and either with nothing pending all fail.
+  - "book it but at 6pm" and "book it?" still fail.
+  - The phrase table has both directions: 8 new passing rows and 8 new failing
+    rows (one old "book it" failing row removed). design-log.md 3.4 is updated.
+
+  Proposed message: Count the pending action's own verb as a yes word. The body
+  says "book it" confirms a booking and never another action.
+
+  Say ok and I'll commit, push, and start commit 4. Your list for commit 4 is
+  clear. Three design points I'll follow, so shout if you disagree:
+  - Write tools only with the gate: build_agents will raise if given write tools
+    unless the gate is installed. The gate has to be something the function can
+    check for, not just a hope.
+  - 4-hour rule: a start before /now goes to staff, and so does an exact 4h
+    minus one second. Exactly 4 hours is allowed.
+  - Refusals that set handoff: the 4-hour rule, a start already passed and /now
+    unreachable set handoff in code and reply from a fixed template, not model
+    text.
+
+✻ Baked for 1m 22s · done 11:48 PM
+
+※ recap: Goal: finish Phase 3 safety in code for the CityCare agent. Commits 1 to 3 are pushed, and the small "own action word is a yes word" follow-up is built and passing, with 454 tests. Next action: your ok to commit and push it, then I start commit 4.
+
+❯ ok, commit and push the follow-up. agreed on all three points. don't          
+  start commit 4 yet, i'm exporting and clearing first.                         
+
+  Ran 1 shell command (ctrl+o to expand)
+
+● Pushed as 7552c79: pytest exit 0 and the working tree is clean. I haven't
+  started commit 4.
+
+  Before you /clear:
+  - Export this session first: /export claude-sessions/0N-phase3-build.txt,
+    using the next number in order. It covers the Phase 3 design and commits 1
+    to 3 plus the follow-up.
+  - Start the next session from the repo root, or use claude --continue.
+
+  Where things stand
+  - Pushed: the emergency detector, the four write tools with verify, the
+    confirmation gate, and the "own verb is a yes word" follow-up.
+  - Next, commit 4: ownership is already in the gate, so this commit covers the
+    rest:
+    - the 4-hour rule, with its handoff;
+    - contact_staff and two strikes;
+    - the router emergency_suspected flag;
+    - the prompt changes ("never ask the patient to confirm yourself, call the
+      tool");
+    - build_agents raising if given write tools without the gate;
+    - default agents getting the write tools.
+  - Then commit 5: one calm run and one chaos run with the budget runner.
+  - Not yet done: I haven't run /cost for Phase 3, so run it after the export.
+  - Open items for the log: the strike rule, the staff-queue record for handoffs
+    (in-memory plus a JSONL file), and the haiku vs sonnet comparison after
+    Phase 3.
+
+  A fresh session won't have this conversation's context. Tell it to read
+  CLAUDE.md, docs/design-log.md (entries 3.1 to 3.4) and agent_service/, and to
+  start from the three agreed points above.
+
+✻ Cogitated for 27s · done 11:52 PM
