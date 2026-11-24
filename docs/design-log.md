@@ -2,14 +2,15 @@
 
 ## Status
 
-- **Current phase:** 1 (agentcore). Commits 1 to 7 of 8 pushed, 8 written but not committed. agentcore is built, nothing was cut. Next: Phase 2 design discussion, after the quiz gate
+- **Current phase:** 2 (router, agents, handoffs): design agreed, no code yet. Phase 1 is complete: agentcore commits 1 to 8 are pushed and nothing was cut. Phase 1 to 2 quiz passed 9/10 (the one miss: when `verify` itself fails the result is `Unknown`, not `Failed`)
 - **Code written:** `agentcore/` config, error and result types, boundary test (commit 1); trace events, cost and trace store (commit 2); session store (commit 3); tool registry (commit 4); hooks (commit 5); retry helper and atomic executor (commit 6); agent loop (commit 7); real-API smoke test (commit 8)
 - **Decided:**
   - Phase 0 (0.1 to 0.5): payment links retry on 503 only and are cached per session; the eval runner uses one session per scenario per run; a timeout on a write is treated like saved-then-503; the booking key is fresh per confirmation and lives in the pending action
   - Phase 1 (1.1 to 1.10): async-only loop, `max_tokens` never sends partial text, effort instead of thinking switches, one atomic executor owns try, retry same key, verify, one result, state saved around writes while history rolls back, policies live in `agent_service` hooks, build order in 1.10
 - **Open:**
   - Real values for timeouts and the turn budget: still provisional. The first real numbers are in 1.12. The full model comparison (haiku vs sonnet for the specialists) moves to the end of Phase 2, when real tools and prompts exist
-  - Prompt caching is unverified: the toy prompts are below the minimum cacheable size, so `cache_read` was 0. Check with the real system prompt and tools in Phase 2
+  - Prompt caching is unverified: the toy prompts were too small, so `cache_read` was 0. The docs give a 512-token minimum for haiku-5-5 and sonnet-5-5 (2.9), so the real specialist prompts should cache. Measure `cache_read` in Phase 2 commit 6
+  - Phase 2 design: 2.1 to 2.10 below. The two-strikes counter moves to Phase 3 and must not be dropped (2.8)
   - Phase 3: how code detects a clear yes, and what to do when the model's read-back differs from the stored payload
 
 Each entry: the decision or question, the alternatives, why, and what failed.
@@ -348,3 +349,83 @@ What this does and does not show:
 - Cost per call: haiku about $0.0001 to $0.0003, sonnet about $0.0012 to $0.0046. The whole smoke test, 23 model calls, cost $0.03.
 - The earlier "10-20s per Sonnet call" guess was far too high for small prompts. Real prompts with the system prompt and hospital tools will be larger, so the 60s model timeout stays provisional until Phase 2 gives representative numbers.
 
+
+---
+
+## Phase 2: router, agents, handoffs (design agreed, no code yet)
+
+Scope tonight is read-only. The four writes (book, reschedule, cancel, payment link) and their hooks are Phase 3. All specialists run on `claude-haiku-5-5` for now. The haiku vs sonnet comparison happens at the end of the phase with real prompts.
+
+### 2.1 Scope: read-only, and what that does and does not prove
+- Tools: `find_doctors`, `free_slots`, `list_appointments`, `list_bills`. Agents: router, `info`, `booking` (reads only), `billing` (reads only), `human` (a fixed reply, no model call).
+- **Own data is built in tonight.** The tool input models have no `phone` field (and `extra="forbid"` is enforced at registration). The service puts the verified phone in `ToolContext.data`, so the model can't supply one.
+- `get_appointment` (`GET /appointments/{id}`) is not exposed: the mock doesn't check ownership on it.
+- Until writes exist, the booking and billing prompts say "I can't change anything yet, staff can help". Without that they could claim to have booked something.
+- Expected result of the calm eval run: about 3 of 10 (02, 07, 09; maybe 06). 02 and 07 pass trivially because nothing can be written. The 07 leak check is the meaningful part. Needs writes: 01, 03, 04, 05, 10. Needs the Phase 3 emergency check: 08.
+
+### 2.2 Emergency check: the call site only
+- The check runs in the service's `handle()` before the router and before any pending-yes handling. Tonight it is a stub that returns `None`, so the shape of `handle()` doesn't change later.
+- Phase 3 builds it as code (keyword and pattern lists for English, Hindi and Hinglish). Whether a second, model-based layer is needed is decided then, using our own tricky phrases, not the 10 given scenarios.
+- On a hit it will: clear any `pending` action, reply with a fixed text, set `emergency=true` and `handoff=true`, and trace it.
+
+### 2.3 Router
+- **Sees:** the message, the last 2 to 4 turns as text only, the agent that answered last turn, and the kind (not the payload) of any pending action.
+- **Answers:** `{agent, language}`, `agent` in `booking | billing | info | human`, `language` in `en | hi | hinglish`. Form: structured output (`output_config.format`, `json_schema`). Docs check (2026-11-24): `claude-haiku-5-5` is on the supported-models list. The page says nothing about combining it with `effort`, so commit 3 starts with a one-call check. Fallback if it fails: a forced `tool_choice` on a `route` tool (haiku 5.5 accepts it, but then skips thinking).
+- **Runs as:** a service-side call using agentcore's `with_retries` and `Tracer`, not `run_turn`, because the router writes no history. Effort `low`, `max_tokens` 1024 (thinking counts inside it).
+- **Unusable output** (invalid JSON, unknown agent, API failure after retries): use the previous turn's agent, or `info` if there is none (read-only and safe). It counts as a failure strike (2.8).
+- **A bare "yes" with a pending action:** the router never triggers a write. With a pending action and a short ambiguous message, the router defaults to the agent that owns the pending action. Recognising a clear yes is Phase 3 (code, not the router). Tonight this rule is built and tested with a hand-made `pending`.
+
+### 2.4 Handoffs: one shared history, text only, plus a facts note
+- **One history for all agents, text only.** At commit time only the user text and the final assistant text are stored. No `tool_use`, `tool_result` or thinking blocks. That avoids three open questions at once: tools in history that the current agent doesn't have, thinking blocks passed between agents, and the history-trimming check (1.12).
+- Rejected: per-agent histories. The store would key by `session_id::agent`, and `pending`, `inflight` and `outcomes` in `state` would no longer line up with where the executor saves them.
+- **Known facts note (the user's change).** Text-only history loses the ids a tool returned. So each session keeps `state["facts"]`: doctors, slots, appointments and bills with their ids and a slot `as_of` turn stamp. Every agent gets it as a marked text block in front of the user message, so nobody re-asks or guesses after a handoff.
+  - Hooks only get a read-only view of state, so they can't write it. Instead the tools write into a per-turn dict `ctx.data["facts"]`, and the service merges it into `state["facts"]` and saves after the turn, also after a failed turn.
+  - The note is added per turn and stripped at commit (a generic transform on the loop, 2.7), so it never piles up in the history.
+  - It is bounded (last N items per kind).
+  - **Facts are for continuity, not authority.** Slots go stale, so agents re-fetch before any booking. Phase 3 hooks still check ownership and slot freshness themselves.
+- **Cache:** the system prompt and tools come before the history, and they differ per agent, so sharing history doesn't share a cache. Each agent has its own prefix. The facts note sits in the last user message, after the cached prefix.
+- Cost of the approach: a later turn may re-read something (a few cheap reads) because tool results are not in history.
+
+### 2.5 Two topics in one message: one agent per turn (known limit)
+- One agent per turn, chosen by priority: emergency, then human, then the agent that touches patient data, then info. Each specialist's prompt says "answer your part, then tell the patient to ask the rest next".
+- **Known limit:** a message with two topics gets only one answered per turn. Running two agents and joining the replies doubles cost and latency, and two writes in one message would clash with the one-write-per-turn hook. For DESIGN.md.
+
+### 2.6 `tests/test_naive_agent.py`
+- Not touched, and `naive_agent.py` stays. The tests call `naive_agent.handle` directly with a monkeypatched client, so they pass whatever `app.py` does. Only `app.py` stops calling it. Delete or keep: decide in Phase 5.
+
+### 2.7 `/chat` always returns 200, and the session lock
+- `handle()` wraps everything in a try/except, and a table maps each `LoopResult` to a `ChatResponse`. Failure replies come from code templates (English and Hinglish first), using the router's `language`.
+- A failed turn with a saved outcome: `done` becomes "it went through, I couldn't finish my reply"; `unknown` becomes a handoff. The service then marks those outcomes `told=true` (`_failed` doesn't), or the next turn would repeat the note.
+- `trace_id` is always present. A malformed request still gets FastAPI's 422. `GET /trace/{session_id}` reads the `TraceStore` and returns the events plus the `summarize()` totals (kept in, they are graded and already built).
+- **Session lock:** the service takes `store.lock(session_id)` around the whole turn (emergency, router, specialist). `run_turn` takes the same non-reentrant `asyncio.Lock`, so nesting would deadlock. Fix: a keyword on `run_turn` saying the lock is already held, plus one test.
+- Two small agentcore additions in commit 2, both generic: that keyword, and a history-commit transform (used for text-only history and for stripping the facts note).
+- **For DESIGN.md:** the lock is in-process, so with several service instances two instances could handle one session at once. Needs a shared lock or sticky routing.
+
+### 2.8 Failure strikes: moved to Phase 3, not dropped
+- The rule (CLAUDE.md): hand off when the agent fails twice in a row on the same request. A strike counter in `state` counts unusable router output and failed turns.
+- Phase 2 tonight hands off only on `escalate`. The counter is a Phase 3 item. **It must not be forgotten.**
+
+### 2.9 Checked against the docs (2026-11-24)
+- Prompt cache minimum: 512 tokens for `claude-haiku-5-5` and `claude-sonnet-5-5` (the caching docs page). Earlier I guessed our prompts might be too small. They probably aren't. Measure `cache_read` in commit 6 rather than assume.
+- Structured outputs on haiku-5-5: supported (see 2.3). Effort plus format together: unverified until commit 3.
+- Haiku 5.5 price: $0.10 / $0.50 per MTok for prompts up to 100K tokens.
+
+### 2.10 Build order, one commit per piece
+Each commit: `pytest` passes with no API key, this log and `flow.md` updated in the same commit, and I stop for the user's ok before committing. Time boxes total about 3h45. Calm eval run = one run, no `--chaos`, hard cost stop, not saved in `evals/reported/`.
+
+| # | Commit | Contains | Box |
+|---|---|---|---|
+| 1 | Add async hospital client and read tools | `agent_service/hospital.py` (6s timeout, typed errors), `tools.py` with the 4 read tools, phone from `ctx.data`, facts written to `ctx.data["facts"]`; tests with `httpx.MockTransport`; `hospital_client.py` untouched | 45 min |
+| 2 | Add already-locked and history-transform options to the loop | two generic agentcore parameters plus tests | 25 min |
+| 3 | Add router with structured output and safe fallback | effort+format check first, schema, fallback, pending rule | 35 min |
+| 4 | Add agents and prompts | info (from `hospital_info.md`, no tools), booking and billing (reads), human (fixed reply), facts note, text-only transform | 45 min |
+| 5 | Add `/chat` orchestration and the trace endpoint | lock, emergency stub, router, agent, result mapping, always 200, outcomes told, facts saved, naive unwired, `GET /trace/{session_id}` with totals | 50 min |
+| 6 | Record the Phase 2 calm eval run and known limits | one real run, `cache_read` check, notes | 25 min |
+
+**Cut list (in this order; each cut is logged as skipped):**
+1. Per-language failure templates: English plus Hinglish only.
+2. Slot `as_of` staleness stamps in the facts note.
+
+Deferred, not cut: the two-strikes counter (2.8, Phase 3). The trace totals are kept (2.7).
+
+**Never cut:** always 200, phone injection, `pytest` passing with no key, docs in the same commit, no write tools.

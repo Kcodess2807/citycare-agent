@@ -1,27 +1,47 @@
 # How a message moves through the system
 
-Status: design for Phase 1. Built so far: commits 1 to 8 of 8 (agentcore is complete, plus a real-API smoke test). Sections 2 and 3 below are implemented; section 1 needs the router and service (Phase 2). The diagrams below are not implemented yet. Updated in the same commit as the code it describes.
-Blocks marked (P2) and (P3) arrive in later phases.
+Status: Phase 2 design agreed (docs/design-log.md, 2.1 to 2.10), no Phase 2 code yet. Built so far: agentcore (Phase 1, complete). Sections 2 and 3 are implemented; section 1 is the Phase 2 design, built in six commits (2.10). Updated in the same commit as the code it describes.
+Blocks marked (P2) are built tonight, (P3) in Phase 3.
 
-## 1. One `/chat` turn
+## 1. One `/chat` turn (Phase 2 design)
+
+The service takes the session lock once for the whole turn. `run_turn` is told the lock is already held (commit 2), so it does not lock again.
 
 ```mermaid
 flowchart TD
-    A[POST /chat: session_id, phone, message] --> B[Load session state + history]
-    B --> C{state.inflight set?}
-    C -- yes --> C1[Run that tool's verify, record outcome]
-    C -- no --> D
-    C1 --> D[Add untold outcomes to context as text]
-    D --> E[Emergency check, before the router (P3)]
-    E -- emergency --> X[Fixed reply: call 108, emergency=true, handoff]
-    E -- ok --> F[Router: haiku picks an agent (P2)]
-    F --> G[Specialist agent loop]
-    G --> H{Loop result}
-    H -- end_turn --> I[Commit history + save state]
-    H -- paused --> I
-    H -- failed --> J[Roll back history, keep state, reply from outcomes + handoff]
-    I --> K[Reply: reply, agent, handoff, emergency, trace_id]
-    J --> K
+    A[POST /chat: session_id, phone, message] --> L[Take the session lock, load state]
+    L --> E[Emergency check: stub returns None tonight, real check P3]
+    E -- emergency P3 --> X[Fixed reply: call 108, emergency=true, handoff, clear pending]
+    E -- ok --> R[Router: haiku, structured output: agent + language]
+    R -- unusable output --> RF[Fallback: last turn's agent, else info]
+    R -- ok --> S
+    RF --> S{Which agent}
+    S -- human --> HU[Fixed handoff reply, no model call]
+    S -- info --> AI[Info agent: hospital_info.md in prompt, no tools]
+    S -- booking / billing --> AB[Specialist agent loop: read tools only, phone from ctx]
+    AI --> RES
+    AB --> RES{Loop result}
+    RES -- done --> OK[Commit TEXT-ONLY history, save facts]
+    RES -- paused P3 --> OK
+    RES -- failed --> FL[Drop history, keep state, save facts, build reply from outcomes, mark outcomes told]
+    OK --> K[Reply: reply, agent, handoff, emergency, trace_id. Always HTTP 200]
+    FL --> K
+    HU --> K
+    X --> K
+```
+
+What the specialist receives each turn: its own system prompt and tools (stable, cached), the shared text-only history, and a marked "known facts" block (ids of doctors, slots, appointments, bills from earlier turns) in front of the user message. The facts block is stripped when the history is committed.
+
+Known limit: one agent per turn. A message with two topics gets one answered, and the reply tells the patient to ask the other next.
+
+### 1b. The facts note
+
+```mermaid
+flowchart LR
+    T[Read tool runs] --> W[Writes ids into ctx.data facts for this turn]
+    W --> M[Service merges into state.facts after the turn, also after a failed turn]
+    M --> N[Next turn: facts block added in front of the user message for any agent]
+    N --> C[Commit transform strips the block from stored history]
 ```
 
 ## 2. The agent loop (agentcore)
