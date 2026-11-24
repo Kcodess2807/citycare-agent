@@ -15,9 +15,9 @@ SPECIALIST_MAX_TOKENS = 4096  # thinking counts inside it (1.3); a ceiling, not 
 SPECIALIST_EFFORT = "low"
 
 TOOLS = {
-    "info": [],
-    "booking": ["find_doctors", "free_slots", "list_appointments"],
-    "billing": ["list_bills"],
+    "info": ["contact_staff"],
+    "booking": ["find_doctors", "free_slots", "list_appointments", "contact_staff"],
+    "billing": ["list_bills", "contact_staff"],
 }
 
 # Only given to an agent when the caller passes a write registry. The default wiring does not (commit 4

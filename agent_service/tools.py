@@ -1,4 +1,4 @@
-"""The four read tools. Hospital knowledge lives here, not in agentcore.
+"""The four read tools and contact_staff. Hospital knowledge lives here, not in agentcore.
 
 Own data: no input model has a `phone` field (extra="forbid" makes a model-supplied one a
 validation error). The service puts the verified phone in `ctx.data["phone"]`.
@@ -32,6 +32,10 @@ class FreeSlotsIn(_In):
 
 class NoIn(_In):
     pass
+
+
+class StaffIn(_In):
+    reason: str = Field(min_length=1, max_length=200, description="Why staff are needed, in a few words. Not shown to the patient.")
 
 
 def _phone(ctx: ToolContext) -> str:
@@ -70,6 +74,14 @@ def read_tools(client: HospitalClient) -> ToolRegistry:
         _remember(ctx, "bills", {b["id"]: b for b in bills})
         return {"bills": bills}
 
+    async def contact_staff(inp: StaffIn, ctx: ToolContext):
+        # Only raises the flag. The service sets handoff=true and writes the reply itself (fixed text, prompts.staff_reply).
+        flag = ctx.data.get("handoff")
+        if flag is not None:
+            flag.setdefault("kind", "asked")
+            flag.setdefault("reason", inp.reason)
+        return {"staff_flagged": True, "note": "Staff are being told. The system replies to the patient, so write one short line."}
+
     # Reads are safe to repeat, so the default retry policy (503 and timeout) applies.
     reg = ToolRegistry()
     for name, desc, model, fn in [
@@ -79,4 +91,9 @@ def read_tools(client: HospitalClient) -> ToolRegistry:
         ("list_bills", "List this patient's own bills and whether each is paid.", NoIn, list_bills),
     ]:
         reg.register(Tool(name=name, description=desc, input_model=model, run=fn, idempotent=True, tags=frozenset({"read"})))
+    # Not a read, but harmless and safe to repeat: it changes nothing at the hospital. Every agent gets it.
+    reg.register(Tool(
+        name="contact_staff", input_model=StaffIn, run=contact_staff, idempotent=True, tags=frozenset({"handoff"}),
+        description="Pass the chat to hospital staff: the patient asks for a person, is upset, or you cannot help.",
+    ))
     return reg

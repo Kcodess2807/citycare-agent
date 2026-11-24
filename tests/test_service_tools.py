@@ -68,9 +68,10 @@ def test_reads_use_the_session_phone_and_hide_it_from_the_model():
     assert "phone" not in call(REG, "list_bills", {}, ctx(phone="9000000001"))["bills"][0]
 
 
-def test_only_read_tools_exist():
-    assert REG.names() == ["find_doctors", "free_slots", "list_appointments", "list_bills"]
-    assert all("read" in REG.get(n).tags and not REG.get(n).atomic for n in REG.names())
+def test_only_read_tools_and_contact_staff_exist():
+    assert REG.names() == ["find_doctors", "free_slots", "list_appointments", "list_bills", "contact_staff"]
+    assert all("read" in REG.get(n).tags and not REG.get(n).atomic for n in REG.names() if n != "contact_staff")
+    assert REG.get("contact_staff").tags == {"handoff"} and not REG.get("contact_staff").atomic
 
 
 # ---- inputs

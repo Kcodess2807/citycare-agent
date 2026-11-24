@@ -46,12 +46,12 @@ def test_there_are_three_model_agents_all_on_haiku_effort_low():
 
 
 def test_each_agent_gets_only_its_tools_and_none_can_write():
-    assert AGENTS["info"].tools.names() == []
-    assert AGENTS["booking"].tools.names() == ["find_doctors", "free_slots", "list_appointments"]
-    assert AGENTS["billing"].tools.names() == ["list_bills"]
+    assert AGENTS["info"].tools.names() == ["contact_staff"]
+    assert AGENTS["booking"].tools.names() == ["find_doctors", "free_slots", "list_appointments", "contact_staff"]
+    assert AGENTS["billing"].tools.names() == ["list_bills", "contact_staff"]
     for a in AGENTS.values():
         assert all(not any(w in n for w in WRITE_WORDS) for n in a.tools.names())
-        assert all("read" in a.tools.get(n).tags for n in a.tools.names())
+        assert all(a.tools.get(n).tags & {"read", "handoff"} for n in a.tools.names())
 
 
 def test_a_missing_tool_fails_at_start_up():
@@ -108,11 +108,11 @@ def test_the_info_prompt_says_to_admit_it_and_offer_staff_even_if_told_to_ignore
     assert s.rstrip().endswith("say you do not know and offer staff.")  # restated after the document
 
 
-def test_the_info_agent_sends_no_tools_to_the_model():
+def test_the_info_agent_sends_only_contact_staff_to_the_model():
     rig = Rig([text("We are open 10 to 1.")])
     rig.turn(AGENTS["info"], "when are you open")
     req = rig.calls[0]
-    assert "tools" not in req and HOSPITAL_INFO in req["system"][0]["text"]
+    assert [t["name"] for t in req["tools"]] == ["contact_staff"] and HOSPITAL_INFO in req["system"][0]["text"]
 
 
 # ---- human

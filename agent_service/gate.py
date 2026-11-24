@@ -12,6 +12,7 @@ refusal, and a refusal never repeats a doctor, time or name.
 
 from __future__ import annotations
 
+import datetime as dt
 import uuid
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
@@ -32,6 +33,12 @@ NO_DOCTOR = f"No such doctor. {NOTHING}"
 NOT_ACTIVE = f"That appointment is not active, so it can't be changed. {NOTHING}"
 PAID = f"That bill is already paid. {NOTHING}"
 CANT_CHECK = f"Could not check the record just now. {NOTHING} Try again shortly."
+# The 4-hour rule (CLAUDE.md): inside 4 hours, or already started, only staff change it. Exactly 4 hours is allowed.
+# The reply and the handoff are set by code from these kinds, never by the model (prompts.staff_reply).
+SOON, CLOCK = "soon", "clock"
+FOUR_HOURS = dt.timedelta(hours=4)
+TOO_SOON = f"That appointment starts within 4 hours or has already started, so only staff can change it. The system tells the patient and passes the chat to staff. {NOTHING}"
+NO_CLOCK = f"Could not check the hospital's clock, so nothing can be changed safely. The system passes the chat to staff. {NOTHING}"
 
 
 @dataclass(frozen=True)
@@ -44,6 +51,7 @@ class Checked:
 class Refused:
     reason: str  # for the model. Nothing in it comes from the id the patient or the model gave
     lookup_failed: bool = False  # the hospital could not be asked, as opposed to "no"
+    handoff: str | None = None  # SOON or CLOCK: the chat goes to staff with a fixed reply
 
 
 def _retryable(e: Exception) -> str | None:
@@ -99,6 +107,12 @@ class Gate:
             return Refused(NO_APPOINTMENT)
         if appt["status"] != "booked":
             return Refused(NOT_ACTIVE)
+        try:  # the hospital's clock, never the machine's. Fixed at Tue 1 Dec 2026 09:00 IST in the mock
+            now = dt.datetime.fromisoformat((await self._get("/now"))["now"])
+            if dt.datetime.fromisoformat(appt["start"]) - now < FOUR_HOURS:  # also true for a start that has passed
+                return Refused(TOO_SOON, handoff=SOON)
+        except (ToolError, ValueError, KeyError, TypeError):
+            return Refused(NO_CLOCK, lookup_failed=True, handoff=CLOCK)
         doctor = doctors.get(appt["doctor_id"], "")
         if tool == "cancel_appointment":
             return {"doctor": doctor, "when": appt["start"]}
@@ -110,6 +124,8 @@ class Gate:
             return Allow()
         checked = await self.check(event.tool.name, event.input, ctx.data)
         if isinstance(checked, Refused):
+            if checked.handoff:
+                ctx.data["handoff"].setdefault("kind", checked.handoff)  # the service answers and hands off
             return Block(checked.reason)
         pending = {
             "tool": event.tool.name,

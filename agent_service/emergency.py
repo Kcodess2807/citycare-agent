@@ -114,6 +114,11 @@ def is_emergency(message: str) -> bool:
     )
 
 
+def reply_for(language: str | None) -> str:
+    """The fixed emergency reply in a language (en, hi, hinglish). For the router's flag, which knows the language."""
+    return _REPLIES.get(language or "", _REPLIES["en"])
+
+
 def check_emergency(message: str) -> str | None:
     """The fixed reply to send if `message` describes an emergency, else None."""
     return _REPLIES[reply_language(message)] if is_emergency(message) else None

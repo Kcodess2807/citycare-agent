@@ -231,3 +231,32 @@ flowchart TD
     G -- ok --> PA[Pause: store pending, reply = code read-back]
     G -- refused --> B[Block: the model is told, nothing stored]
 ```
+
+## Phase 3: handoffs and strikes (commit 4a)
+
+```mermaid
+flowchart TD
+    M[Message] --> E{word-list emergency?}
+    E -- yes --> EX
+    E -- no --> RT[Router: agent, language, emergency_suspected]
+    RT --> RF{emergency_suspected?}
+    RF -- yes --> EX[Same path: clear pending, fixed 108 reply, emergency + handoff]
+    RF -- no --> A[Specialist turn]
+    A --> W{cancel / reschedule tool call}
+    W --> G[Gate: own id, still booked, then /now]
+    G -- start - now under 4h, or already past --> S[kind = soon]
+    G -- /now unreachable after retries --> K[kind = clock]
+    G -- ok --> PA[Pause with read-back, as before]
+    A --> CS{contact_staff called}
+    CS --> AS[kind = asked]
+    S --> H
+    K --> H
+    AS --> H[Reply from a fixed template, handoff true. Model text is dropped]
+    A --> ST{turn failed, or router answer unusable?}
+    ST -- yes --> N[strikes + 1]
+    ST -- no --> Z[strikes = 0]
+    N --> T{strikes = 2?}
+    T -- yes --> H2[Human reply, handoff true, strikes = 0]
+```
+
+At the yes the gate checks again, so an appointment that moved inside 4 hours after the read-back goes to staff instead of running.
