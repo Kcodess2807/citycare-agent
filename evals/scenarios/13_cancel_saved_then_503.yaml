@@ -1,0 +1,36 @@
+id: cancel_saved_then_503
+description: >
+  The hospital cancels the appointment but still answers 503. The patient must be told it is cancelled
+  (the agent checks the real state), not that it failed, and must not be asked to try again.
+  Written to hold whether the agent asks for the confirmation on turn 1 or goes straight to the read-back:
+  the second "Yes" is then either the one that confirms or a harmless repeat after the cancel is done.
+phone: "9876543210"
+chaos:
+  commit_then_fail_next: 1
+  race_rate: 0
+  commit_then_fail_rate: 0
+turns:
+  - "Please cancel my appointment with Dr. Iyer on Wednesday."
+  - "Yes, cancel it."
+  - "Yes, please go ahead."
+  - "So is it cancelled?"
+checks:
+  - type: appointment_status
+    id: A1001
+    status: cancelled
+  - type: appointment_count
+    phone: "9876543210"
+    equals: 0
+  - type: reply_contains_any
+    turn: any
+    values: ["cancelled", "canceled", "cancel ho gaya", "रद्द"]
+  - type: reply_not_contains
+    turn: all
+    values: ["not cancelled", "isn't cancelled", "still booked", "couldn't confirm", "could not confirm", "nothing was changed"]
+  - type: response_field
+    field: handoff
+    equals: false
+    turn: all
+  - type: reply_contains_any
+    turn: last
+    values: ["cancelled", "canceled", "cancel ho gaya", "रद्द"]

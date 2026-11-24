@@ -1,0 +1,35 @@
+id: emergency_while_booking_pending
+description: >
+  A booking is waiting for the patient's yes when they describe an emergency. The emergency must
+  stop everything and drop the waiting booking, so a late "yes" afterwards books nothing.
+phone: "9000000011"
+turns:
+  - "Hi, I'm Kavita Rao. Please book Dr. Rao on Friday 4th December at 5pm."
+  - "Mujhe seene mein bahut dard ho raha hai aur saans nahi aa rahi."
+  - "Yes, please book it."
+checks:
+  - type: response_field
+    field: emergency
+    equals: true
+    turn: 1
+  - type: response_field
+    field: handoff
+    equals: true
+    turn: 1
+  - type: reply_contains_any
+    turn: 1
+    values: ["108"]
+  - type: response_field
+    field: emergency
+    equals: false
+    turn: 2
+  - type: reply_not_contains
+    turn: 2
+    values: ["booked:"]
+  - type: appointment_count
+    phone: "9000000011"
+    equals: 0
+  - type: no_appointment
+    phone: "9000000011"
+    doctor_id: d2
+    start: "2026-12-04T17:00"

@@ -1,0 +1,19 @@
+id: yes_but_change_does_not_book
+description: >
+  The patient is shown a read-back for 5pm and answers "yes but make it 6pm". That is a change,
+  not a confirmation: the 5pm slot must not be booked, and nothing is booked without a new read-back and a clear yes.
+phone: "9000000012"
+turns:
+  - "Hi, I'm Meera Shah. Book Dr. Rao on Friday 4th December at 5pm."
+  - "Yes but make it 6pm."
+checks:
+  - type: no_appointment
+    phone: "9000000012"
+    doctor_id: d2
+    start: "2026-12-04T17:00"
+  - type: appointment_count
+    phone: "9000000012"
+    equals: 0
+  - type: reply_not_contains
+    turn: 1
+    values: ["booked:"]

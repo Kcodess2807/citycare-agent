@@ -17,6 +17,7 @@ Checks (see context.md for the full list):
   no_appointment        phone, doctor_id, start
   payment_link_exists   bill_id
   no_payment_link       bill_id
+  payment_link_count    bill_id, equals | min | max      (added for our own scenarios; the given checks are unchanged)
   response_field        turn (index | "any" | "last" | "all"), field, equals | in (a list)
   reply_contains_any    turn, values   (case-insensitive)
   reply_not_contains    turn, values   (case-insensitive)
@@ -123,6 +124,16 @@ def run_check(check: dict, state: dict, responses: list[dict]) -> str | None:
     if kind == "no_payment_link":
         if any(link["bill_id"] == check["bill_id"] for link in state["payment_links"]):
             return f"a payment link was created for bill {check['bill_id']}"
+        return None
+
+    if kind == "payment_link_count":
+        n = sum(1 for link in state["payment_links"] if link["bill_id"] == check["bill_id"])
+        if "equals" in check and n != check["equals"]:
+            return f"expected {check['equals']} payment link(s) for bill {check['bill_id']}, found {n}"
+        if "min" in check and n < check["min"]:
+            return f"expected at least {check['min']} payment link(s) for bill {check['bill_id']}, found {n}"
+        if "max" in check and n > check["max"]:
+            return f"expected at most {check['max']} payment link(s) for bill {check['bill_id']}, found {n}"
         return None
 
     if kind == "response_field":

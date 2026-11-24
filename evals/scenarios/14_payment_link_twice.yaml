@@ -1,0 +1,19 @@
+id: payment_link_twice
+description: >
+  The patient asks for the payment link for the same bill twice. Exactly one link may exist at the hospital:
+  the second request must not create another one.
+phone: "9876543210"
+turns:
+  - "Please send me the payment link for my unpaid bill."
+  - "Yes, send it."
+  - "I lost it, please send the payment link again."
+  - "Yes, send it."
+checks:
+  - type: payment_link_exists
+    bill_id: B1
+  - type: payment_link_count
+    bill_id: B1
+    equals: 1
+  - type: reply_contains_any
+    turn: 1
+    values: ["pay.citycare"]
