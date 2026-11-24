@@ -1,4 +1,4 @@
-"""Async client for the hospital system. Reads only for now (writes arrive in Phase 3).
+"""Async client for the hospital system.
 
 No retries here: the executor owns retry. This client only turns every outcome into a value or a
 typed agentcore error, so the executor can tell "refused" from "try again" from "no answer".
@@ -37,8 +37,14 @@ class HospitalClient:
         return await self.get("/now")
 
     async def get(self, path: str, **params: Any) -> Any:
+        return await self._send("GET", path, params={k: v for k, v in params.items() if v is not None})
+
+    async def post(self, path: str, body: dict[str, Any] | None = None) -> Any:
+        return await self._send("POST", path, json=body or {})
+
+    async def _send(self, method: str, path: str, **kw: Any) -> Any:
         try:
-            r = await self._http.get(path, params={k: v for k, v in params.items() if v is not None})
+            r = await self._http.request(method, path, **kw)
         except httpx.TimeoutException as e:
             raise ToolOutcomeUnknown(f"The hospital system did not answer in time ({type(e).__name__}).") from e
         except httpx.TransportError as e:
