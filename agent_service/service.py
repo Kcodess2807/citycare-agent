@@ -16,7 +16,7 @@ from typing import Any
 
 from agent_service import confirm, emergency, yes_layer
 from agent_service.agents import build_agents
-from agent_service.facts import facts_note, merge_facts, text_only, with_note
+from agent_service.facts import facts_note, merge_facts, text_only, with_note, write_facts
 from agent_service.gate import Checked, Gate, Refused
 from agent_service.hospital import HospitalClient
 from agent_service.prompts import done_but_no_reply, failure_reply, human_reply, staff_reply
@@ -182,7 +182,7 @@ class ChatService:
             "phone": req.phone, "facts": {}, "links": dict(state.get("links") or {}),
             "language": language, "agent": agent, "gate": {}, "handoff": {}, "idempotency_key": pending.get("key"),
         }
-        handoff = False
+        handoff, result, held = False, None, False
         tool = self.writes.get(str(pending.get("tool")))
         try:
             inp = tool.input_model.model_validate(pending.get("params")) if tool else None
@@ -210,6 +210,7 @@ class ChatService:
                         # The slot may be taken by the patient's own booking (a retry, a second chat). Ask before offering anything.
                         own = await self.gate.holds(inp.doctor_id, inp.start, req.phone)
                         if own is True:
+                            held = True
                             reply = confirm.already_reply(pending["display"], language)
                         elif own is None:  # cannot tell whose booking it is, so say neither "booked" nor "not booked"
                             reply, handoff = confirm.unknown_reply(language), True
@@ -217,6 +218,8 @@ class ChatService:
                             state["pending"], reply = offer, confirm.taken_offer_reply(offer["readback"], language)  # waits for its own yes
         state["links"] = data["links"]
         state["strikes"] = 0
+        if tool is not None and result is not None:  # every finished write leaves its result where the next turn sees it
+            state["facts"] = merge_facts(state.get("facts"), write_facts(tool.name, pending, result, held=held))
         for outcome in state.get("outcomes", []):
             outcome["told"] = True  # the patient is told by this reply, so the model need not repeat it next turn
         await self.store.save_state(key, state)

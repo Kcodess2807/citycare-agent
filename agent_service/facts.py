@@ -55,12 +55,49 @@ def _day_time(iso: str) -> str:
         return str(iso)
 
 
+_VERB = {
+    "book_appointment": "booking", "reschedule_appointment": "reschedule", "cancel_appointment": "cancellation",
+    "create_payment_link": "payment link",
+}
+
+
+def write_facts(tool: str, pending: dict[str, Any], result: Any, held: bool = False) -> dict[str, Any]:
+    """What a finished write (Done, Failed or Unknown) left behind, as facts for the next turns.
+
+    The model must not have to guess whether something happened: the system wrote the reply, so the system also
+    records the result where the next turn sees it. `result` is an agentcore Done, Failed or Unknown.
+    """
+    d = pending.get("display") or {}
+    who = d.get("doctor", "")
+    out: dict[str, Any] = {}
+    if result.status == "done":
+        v = result.value if isinstance(result.value, dict) else {}
+        line = {
+            "book_appointment": f"booking DONE: appointment {v.get('id', '')} with {who} at {_day_time(v.get('start', d.get('when')))} for {d.get('patient', '')}",
+            "reschedule_appointment": f"reschedule DONE: appointment {v.get('id', '')} with {who} moved from {_day_time(d.get('old'))} to {_day_time(v.get('start', d.get('new')))}",
+            "cancel_appointment": f"cancellation DONE: appointment {v.get('id', '')} with {who} on {_day_time(d.get('when'))} is cancelled",
+            "create_payment_link": f"payment link DONE: bill {v.get('bill_id', '')} ({d.get('what', '')}, Rs {d.get('amount', '')}), link {v.get('url', '')}",
+        }.get(tool, f"{tool} DONE")
+        if v.get("id"):
+            out["appointments"] = {v["id"]: v}  # the appointment as it is now, so the note's appointment line is current too
+    elif result.status == "failed" and held:  # a 409 because the patient already has exactly this appointment
+        line = f"booking NOT NEW: the patient already holds this appointment ({who} at {_day_time(d.get('when'))}), nothing new was booked"
+    elif result.status == "failed":
+        line = f"{_VERB.get(tool, tool)} NOT DONE: it failed and nothing was changed ({'the slot was taken' if 'slot_taken' in result.reason else 'see the reply the patient got'})"
+    else:
+        line = f"{_VERB.get(tool, tool)} UNKNOWN: it could not be confirmed either way and staff were asked. Do not say it was done and do not say it was not"
+    out["writes"] = {f"{tool}:{str(pending.get('key', ''))[:8]}": line}
+    return out
+
+
 def facts_note(facts: dict[str, Any] | None, now: dict[str, Any] | None = None) -> str:
     """The marked block, or "" when there is nothing to say. `now` is the hospital's /now answer."""
     facts = facts or {}
     lines: list[str] = []
     if now:
         lines.append(f"Hospital time now: {now.get('weekday', '')} {now.get('now', '')} ({now.get('timezone', '')})")
+    for line in (facts.get("writes") or {}).values():
+        lines.append("Finished by the system, true (the system told the patient): " + line)
     if facts.get("doctors"):
         lines.append("Doctors: " + "; ".join(f"{k} {d.get('name', '')} ({d.get('specialty', '')})" for k, d in facts["doctors"].items()))
     for key, free in (facts.get("slots") or {}).items():
