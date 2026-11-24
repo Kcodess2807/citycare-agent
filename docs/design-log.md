@@ -2,8 +2,8 @@
 
 ## Status
 
-- **Current phase:** 1 (agentcore). Commit 1 of 8 written, not yet committed. Deadline for agentcore: 7 pm
-- **Code written:** `agentcore/` config, error and result types, plus the boundary test (commit 1)
+- **Current phase:** 1 (agentcore). Commits 1 and 2 of 8 done (2 not yet committed). Deadline for agentcore: 7 pm
+- **Code written:** `agentcore/` config, error and result types, boundary test (commit 1); trace events, cost and trace store (commit 2)
 - **Decided:**
   - Phase 0 (0.1 to 0.5): payment links retry on 503 only and are cached per session; the eval runner uses one session per scenario per run; a timeout on a write is treated like saved-then-503; the booking key is fresh per confirmation and lives in the pending action
   - Phase 1 (1.1 to 1.10): async-only loop, `max_tokens` never sends partial text, effort instead of thinking switches, one atomic executor owns try, retry same key, verify, one result, state saved around writes while history rolls back, policies live in `agent_service` hooks, build order in 1.10
@@ -241,4 +241,14 @@ Each commit: tests pass with no API key, `design-log.md` and `flow.md` updated i
 - The boundary test's forbidden list includes `handoff` and `staff`, so the loop result will say `escalate`, not `handoff`. The service maps `escalate` to the `/chat` field `handoff`.
 - The list leaves out `cancel` and `cancelled`, so `asyncio.CancelledError` and similar words in commit 6 don't trip it. Matching is whole words only, so `billed` is fine too.
 - Checked: a temporary file with a forbidden word and an `agent_service` import makes the boundary tests fail.
+
+**Commit 2: trace events and trace store.**
+- `TraceEvent` is one flat model: trace id, session id, sequence number, type (`model_call`, `tool_call`, `hook_decision`, `state_saved`, `stop`), name, start time, duration, status, attempt, input, output, token usage and cost. Input and output are strings cut to 2000 characters (config `trace_field_chars`).
+- A `Tracer` belongs to one turn and numbers its events. `async with tracer.span(...)` times a block, marks it `error` if it raises, and re-raises.
+- Cost comes from a price table for the three 5.5 models. Input and output prices are from `context.md`. Cache prices are not in `context.md`: cache read for sonnet and opus is from the claude-api skill's table, and haiku cache read (0.1x input) and every cache write (1.25x input) are assumptions, marked as such in a comment in the source. An unknown model gives `None`, never a guessed price. The loop must pass the model name it requested, because the fake client reports `fake-model`.
+- Key safety: anything that looks like `sk-ant-...` is replaced by `[redacted]` before an event is stored. This is a second line of defence, since the key is never meant to reach a trace.
+- `InMemoryTraceStore`: sessions kept in least-recently-used order, capped at `trace_max_sessions`. With a path it also appends every event to one JSONL file (`traces/` is now in `.gitignore`), and `get` reads that file for a session that was evicted or from before a restart. One file, not one per session, because the session id comes from the request and must never become a file name.
+- The JSONL write is a blocking call inside async code (marked `TODO:` in the source). Revisit if it shows up in measured latency.
+- The LRU cap is on the 7 pm cut list, but it is about 4 lines, so it stays.
+- `summarize(events)` totals a session over all its turns: turns (distinct trace ids), model and tool call counts, errors, token usage (including thinking tokens), cost and summed call time. Calls with tokens but no price are counted in `unpriced_calls`, so a nonzero value means the cost is a lower bound.
 

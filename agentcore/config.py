@@ -52,3 +52,4 @@ class RuntimeConfig(BaseModel):
     session_ttl_s: float = Field(1800.0, gt=0)
     history_cap_messages: int = Field(40, ge=2)
     trace_max_sessions: int = Field(1000, ge=1)
+    trace_field_chars: int = Field(2000, ge=100, description="Input and output of an event are cut to this many characters")
