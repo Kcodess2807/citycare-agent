@@ -1,6 +1,6 @@
 # How a message moves through the system
 
-Status: Phase 2 design agreed (docs/design-log.md, 2.1 to 2.10). Built so far: agentcore (Phase 1, complete) and Phase 2 commits 1 and 2 (hospital client and read tools, section 6; `lock_held` and `history_transform` on the loop, see the notes under section 2). Sections 2 and 3 are implemented; section 1 is the Phase 2 design, built in six commits (2.10). Updated in the same commit as the code it describes.
+Status: Phase 2 design agreed (docs/design-log.md, 2.1 to 2.10). Built so far: agentcore (Phase 1, complete) and Phase 2 commits 1 to 3 (hospital client and read tools, section 6; `lock_held` and `history_transform` on the loop, see the notes under section 2; the router, section 7). Sections 2 and 3 are implemented; section 1 is the Phase 2 design, built in six commits (2.10). Updated in the same commit as the code it describes.
 Blocks marked (P2) are built tonight, (P3) in Phase 3.
 
 ## 1. One `/chat` turn (Phase 2 design)
@@ -132,3 +132,23 @@ flowchart TD
     TU --> X
     TR -. retries used up .-> UA[Failed: unavailable. A read has no verify and is not atomic]
 ```
+
+## 7. The router (built, Phase 2 commit 3)
+
+```mermaid
+flowchart TD
+    M[Message + last 2 turns + last agent + kind of pending action] --> C[Haiku call: effort low, JSON schema agent + language, 10s timeout]
+    C -- API error --> RT{Retry left?}
+    RT -- yes, backoff / retry-after --> C
+    RT -- no, or a 400 --> FB
+    C -- answer --> V{Valid JSON and agent in the four?}
+    V -- no, not retried --> FB[Fallback agent: pending owner, else last agent, else info. fallback=true is a strike]
+    V -- yes --> P{Pending action and 3 words or fewer and not human?}
+    P -- yes --> OWN[Agent that owns the pending action]
+    P -- no --> PICK[The router's agent]
+    FB --> OUT[Route: agent, language, fallback]
+    OWN --> OUT
+    PICK --> OUT
+```
+
+Every attempt is a `model_call` trace event (role router) with tokens and cost. Unusable answers are marked `unusable`.

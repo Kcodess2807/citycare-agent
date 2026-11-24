@@ -106,7 +106,7 @@ class _Run:
 # ---------------------------------------------------------------- model errors
 
 
-def _classify_model_error(e: Exception) -> RetryKind | None:
+def classify_model_error(e: Exception) -> RetryKind | None:
     """Retry rate limits, overload, server errors and connection trouble. Never a bad request."""
     if isinstance(e, anthropic.APIStatusError):
         return "retryable" if e.status_code in (408, 409, 429) or e.status_code >= 500 else None
@@ -115,7 +115,7 @@ def _classify_model_error(e: Exception) -> RetryKind | None:
     return None
 
 
-def _retry_after(e: Exception) -> float | None:
+def retry_after(e: Exception) -> float | None:
     if isinstance(e, anthropic.APIStatusError):
         try:
             return float(e.response.headers.get("retry-after", ""))
@@ -291,8 +291,8 @@ class AgentLoop:
 
         try:
             return await with_retries(
-                attempt, self.config.model_retry, _classify_model_error,
-                sleep=self._sleep, rng=self._rng, can_wait=lambda d: run.remaining() > d, min_delay=_retry_after,
+                attempt, self.config.model_retry, classify_model_error,
+                sleep=self._sleep, rng=self._rng, can_wait=lambda d: run.remaining() > d, min_delay=retry_after,
             )
         except _Fail:
             raise
