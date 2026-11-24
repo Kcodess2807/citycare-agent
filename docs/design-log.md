@@ -2,14 +2,14 @@
 
 ## Status
 
-- **Current phase:** 1 (agentcore). Commits 1 to 6 of 8 pushed, 7 written but not committed. Deadline for agentcore: 7 pm (nothing cut so far)
-- **Code written:** `agentcore/` config, error and result types, boundary test (commit 1); trace events, cost and trace store (commit 2); session store (commit 3); tool registry (commit 4); hooks (commit 5); retry helper and atomic executor (commit 6); agent loop (commit 7)
+- **Current phase:** 1 (agentcore). Commits 1 to 7 of 8 pushed, 8 written but not committed. agentcore is built, nothing was cut. Next: Phase 2 design discussion, after the quiz gate
+- **Code written:** `agentcore/` config, error and result types, boundary test (commit 1); trace events, cost and trace store (commit 2); session store (commit 3); tool registry (commit 4); hooks (commit 5); retry helper and atomic executor (commit 6); agent loop (commit 7); real-API smoke test (commit 8)
 - **Decided:**
   - Phase 0 (0.1 to 0.5): payment links retry on 503 only and are cached per session; the eval runner uses one session per scenario per run; a timeout on a write is treated like saved-then-503; the booking key is fresh per confirmation and lives in the pending action
   - Phase 1 (1.1 to 1.10): async-only loop, `max_tokens` never sends partial text, effort instead of thinking switches, one atomic executor owns try, retry same key, verify, one result, state saved around writes while history rolls back, policies live in `agent_service` hooks, build order in 1.10
 - **Open:**
-  - Real values for timeouts and turn budget: provisional now, set from `tools/measure.py` (commit 8)
-  - Does trimming history break the thinking-block check? Test with one real call (commit 8)
+  - Real values for timeouts and the turn budget: still provisional. The first real numbers are in 1.12. The full model comparison (haiku vs sonnet for the specialists) moves to the end of Phase 2, when real tools and prompts exist
+  - Prompt caching is unverified: the toy prompts are below the minimum cacheable size, so `cache_read` was 0. Check with the real system prompt and tools in Phase 2
   - Phase 3: how code detects a clear yes, and what to do when the model's read-back differs from the stored payload
 
 Each entry: the decision or question, the alternatives, why, and what failed.
@@ -321,4 +321,30 @@ Each commit: tests pass with no API key, `design-log.md` and `flow.md` updated i
 - **Tests** (46 for the loop): every stop reason, step limit, 429 / 529 / connection / timeout retried, 400 not, retry-after, a tool error returned as a result, one result per call including blocked and skipped, pause saves the payload, pause dropped on failure, rollback with surviving state, the never-raises cases (client, garbage response, store commit and load failing, broken tool and hook), cancellation, request shape, thinking blocks unchanged, trace and cost, and two turns of one session not interleaving. `tests/async_fake.py` wraps the provided `tests/fake_claude.py` (untouched) with an async `create` and optional per-call delays.
 - **Mutation checks:** accepting a `max_tokens` reply as final, saving `pending` at pause time, and committing history on a failed turn each make specific tests fail.
 - **Known gaps:** `x-should-retry: false` and an HTTP-date `retry-after` are ignored. `effort` is passed through without checking the value. Router plus specialist inside one session lock is Phase 2 (the router will be a plain `messages.create` call or a second `run_turn` on the same session; to decide there). The thinking-block/history-trimming question is still for commit 8.
+
+### 1.12 Commit 8: real-API smoke test (run 2026-11-24, total cost $0.03)
+
+`tools/smoke_real.py` runs by hand (`uv run python tools/smoke_real.py`), is not part of pytest, reads the key from `.env` and prints only model, step, stop reason, tokens, cost, time and, for a rejection, the status code and a scrubbed message. It has a $0.40 hard stop. `tools/measure.py` from the 1.10 plan is dropped: the full comparison needs real tools, so it moves to the end of Phase 2.
+
+**Check A: does the API accept what the loop sends? Yes, on both models.** One turn each on haiku-5-5 and sonnet-5-5 with a toy `add_numbers` tool at effort `low`: `tool_use`, then `end_turn`, and the answer contained 42. So the system block with `cache_control`, the pydantic tool schema, `output_config.effort`, and the blocks we store from real responses (dumped with `exclude_none`) are all accepted, with no 400.
+
+**Check B: thinking blocks and trimming. V1 (trim at a turn boundary) was accepted on both models, so trimming stays on.**
+
+| Variant | sonnet-5-5 | haiku-5-5 |
+|---|---|---|
+| V0: history exactly as stored, plus a new message | accepted | accepted |
+| V1: the whole first turn dropped, as `trim_history` does | accepted | accepted |
+| V2: all thinking blocks stripped | accepted | not run |
+
+What this does and does not show:
+- Histories were 14 messages. Sonnet produced 1 thinking block (in turn 2, so V1 kept it), haiku produced 2 (one in turn 1, which V1 dropped, one in turn 2, which it kept). So the haiku V1 run is the informative one: dropping a turn that contained a thinking block while keeping a later block was accepted. The sonnet V1 run dropped a turn with no thinking block.
+- Thinking blocks come back with empty text (`display` is omitted by default) and a signature, and they were stored and sent back without trouble.
+- Thinking was uncommon at effort `high` on these tiny tasks: in the 7 loop calls per model, sonnet thought once and haiku twice (the V0/V1 answers aside, where haiku thought both times and sonnet once). n is small.
+- **Unproven for other accounts.** The docs say the history-editing check is enforced for accounts created on or after 2026-08-31. I don't know whether this key's account is enforced, and a reviewer's key may differ. If a reviewer's run rejects trimmed history, the failure shows as a `model_error` with a 400. Per the agreed rule (turn trimming off if V1 is rejected) nothing changes now, but the cap is a config value (`history_cap_messages`), so turning it off is a one-line change.
+- **Prompt caching not verified:** `cache_read` and `cache_write` were 0 because the toy prompts are far below the minimum cacheable size.
+
+**First real latency and cost numbers (replace the guesses in 1.4, small samples):**
+- A model call with a tiny prompt took about 0.6 to 1.5s on both models when it did not think. A call that thought took about 1.4 to 5s.
+- Cost per call: haiku about $0.0001 to $0.0003, sonnet about $0.0012 to $0.0046. The whole smoke test, 23 model calls, cost $0.03.
+- The earlier "10-20s per Sonnet call" guess was far too high for small prompts. Real prompts with the system prompt and hospital tools will be larger, so the 60s model timeout stays provisional until Phase 2 gives representative numbers.
 

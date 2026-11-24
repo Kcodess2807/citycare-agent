@@ -1,6 +1,6 @@
 # How a message moves through the system
 
-Status: design for Phase 1. Built so far: commits 1 to 7 of 8 (everything in agentcore except the measure script). Sections 2 and 3 below are implemented; section 1 needs the router and service (Phase 2). The diagrams below are not implemented yet. Updated in the same commit as the code it describes.
+Status: design for Phase 1. Built so far: commits 1 to 8 of 8 (agentcore is complete, plus a real-API smoke test). Sections 2 and 3 below are implemented; section 1 needs the router and service (Phase 2). The diagrams below are not implemented yet. Updated in the same commit as the code it describes.
 Blocks marked (P2) and (P3) arrive in later phases.
 
 ## 1. One `/chat` turn
